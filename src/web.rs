@@ -15,7 +15,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{DailyExtremes, DayRisk, Db, OutdoorReading, Reading, Records};
+use crate::db::{DailyExtremes, DayRisk, Db, DeltaPoint, OutdoorReading, Reading, Records};
 use crate::unix_ts_now;
 use crate::weather::{self, Assessment};
 
@@ -40,6 +40,7 @@ pub async fn serve(db: Db, listen: SocketAddr) -> Result<()> {
         .route("/api/daily", get(daily))
         .route("/api/conditions", get(conditions))
         .route("/api/risk", get(risk))
+        .route("/api/delta", get(delta))
         .with_state(db);
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -98,6 +99,23 @@ async fn daily(
     let days = params.days.unwrap_or(30).clamp(1, 366);
     let from_ts = unix_ts_now() - i64::from(days) * 86_400;
     let rows = tokio::task::spawn_blocking(move || db.daily_extremes(from_ts)).await??;
+    Ok(Json(rows))
+}
+
+/// Minimum delta bucket width; outdoor observations only arrive every
+/// 15 minutes, so finer buckets would mostly be empty on the outdoor side.
+const DELTA_MIN_BUCKET_SECS: i64 = 900;
+
+async fn delta(
+    State(db): State<Db>,
+    Query(params): Query<ReadingsParams>,
+) -> Result<Json<Vec<DeltaPoint>>, AppError> {
+    let hours = params.hours.unwrap_or(24).clamp(1, MAX_HOURS);
+    let window_secs = i64::from(hours) * 3600;
+    let from_ts = unix_ts_now() - window_secs;
+    let bucket_secs = (window_secs / MAX_POINTS).max(DELTA_MIN_BUCKET_SECS);
+    let rows =
+        tokio::task::spawn_blocking(move || db.temperature_delta(from_ts, bucket_secs)).await??;
     Ok(Json(rows))
 }
 

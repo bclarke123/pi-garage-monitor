@@ -104,6 +104,7 @@ open http://localhost:8080
 - `GET /api/daily?days=30` — per-local-calendar-day temperature min/max
 - `GET /api/conditions` — latest indoor + outdoor state plus the condensation assessment (`status.level` is `ok`/`warning`/`critical`)
 - `GET /api/risk?days=30` — retroactive per-day condensation summary: minutes saturated / near saturation, humidity peak, indoor low, outdoor dew-point max, and the day's worst severity level
+- `GET /api/delta?hours=24` — indoor vs outdoor temperature joined into shared ≥15-min buckets, with `delta_c` (positive = warmer inside); empty until weather polling is enabled
 
 Readings are `{ ts, temperature_c, humidity_pct, pressure_hpa }` with `ts`
 in Unix seconds.

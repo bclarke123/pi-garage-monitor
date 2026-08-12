@@ -18,6 +18,7 @@
     --series-temp:    #2a78d6;  /* categorical slot 1: blue   */
     --series-hum:     #eb6834;  /* categorical slot 2: orange */
     --series-pres:    #1baf7a;  /* categorical slot 3: aqua   */
+    --series-delta:   #eda100;  /* categorical slot 4: yellow */
   }
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) .viz-root {
@@ -33,6 +34,7 @@
       --series-temp:    #3987e5;
       --series-hum:     #d95926;
       --series-pres:    #199e70;
+      --series-delta:   #c98500;
     }
   }
   :root[data-theme="dark"] .viz-root {
@@ -48,6 +50,7 @@
     --series-temp:    #3987e5;
     --series-hum:     #d95926;
     --series-pres:    #199e70;
+    --series-delta:   #c98500;
   }
 
   * { box-sizing: border-box; }
@@ -208,6 +211,7 @@
   <div class="card" id="chart-temp"><h2>Temperature (°C)</h2></div>
   <div class="card" id="chart-hum"><h2>Relative humidity (%)</h2></div>
   <div class="card" id="chart-pres"><h2>Pressure (hPa)</h2></div>
+  <div class="card" id="chart-delta"><h2>Indoor − outdoor temperature (Δ°C)</h2></div>
   <div class="card" id="chart-daily"><h2>Daily highs &amp; lows (°C, last 30 days)</h2></div>
 
   <div class="card" id="risk-card" hidden>
@@ -220,14 +224,24 @@
 <script>
 "use strict";
 
+let hours = 24;
+let data = [];
+let deltaData = [];
+
 const CHARTS = [
   { card: "chart-temp", field: "temperature_c", color: "--series-temp", unit: "°C",  decimals: 1 },
   { card: "chart-hum",  field: "humidity_pct",  color: "--series-hum",  unit: "%",   decimals: 0 },
   { card: "chart-pres", field: "pressure_hpa",  color: "--series-pres", unit: "hPa", decimals: 1 },
+  {
+    card: "chart-delta", field: "delta_c", color: "--series-delta", unit: "°C", decimals: 1,
+    rows: () => deltaData,
+    zeroLine: true,
+    emptyText: "Needs outdoor weather data — enable it with --latitude/--longitude.",
+    tooltipHtml: r =>
+      `<span class="v">Δ ${fmt(r.delta_c, 1)} °C</span><br>` +
+      `<span class="t">in ${fmt(r.indoor_c, 1)} °C · out ${fmt(r.outdoor_c, 1)} °C</span>`,
+  },
 ];
-
-let hours = 24;
-let data = [];
 
 function fmt(v, d) {
   return v.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -268,12 +282,13 @@ function xLabel(ts) {
 
 function drawChart(spec) {
   const card = document.getElementById(spec.card);
+  const rows = spec.rows ? spec.rows() : data;
   card.querySelectorAll("svg, .empty, .tooltip").forEach(n => n.remove());
 
-  if (data.length < 2) {
+  if (rows.length < 2) {
     const p = document.createElement("div");
     p.className = "empty";
-    p.textContent = "Not enough data yet — check back after a few readings.";
+    p.textContent = spec.emptyText || "Not enough data yet — check back after a few readings.";
     card.appendChild(p);
     return;
   }
@@ -287,8 +302,8 @@ function drawChart(spec) {
   const M = { top: 8, right: 12, bottom: 22, left: 44 };
   const iw = W - M.left - M.right, ih = H - M.top - M.bottom;
 
-  const xs = data.map(r => r.ts);
-  const vs = data.map(r => r[spec.field]);
+  const xs = rows.map(r => r.ts);
+  const vs = rows.map(r => r[spec.field]);
   const xMin = xs[0], xMax = xs[xs.length - 1];
   let vMin = Math.min(...vs), vMax = Math.max(...vs);
   const pad = (vMax - vMin) * 0.12 || 1;
@@ -318,6 +333,10 @@ function drawChart(spec) {
     label.textContent = fmtTick(t, tickDecimals);
   }
   el("line", { x1: M.left, x2: M.left + iw, y1: M.top + ih, y2: M.top + ih, stroke: axisColor, "stroke-width": 1 });
+  if (spec.zeroLine && vMin < 0 && vMax > 0) {
+    // Zero reference: above = warmer inside than out.
+    el("line", { x1: M.left, x2: M.left + iw, y1: Y(0), y2: Y(0), stroke: axisColor, "stroke-width": 1.5 });
+  }
 
   const nx = Math.max(2, Math.floor(iw / 130));
   for (let i = 0; i <= nx; i++) {
@@ -329,7 +348,7 @@ function drawChart(spec) {
     label.textContent = xLabel(ts);
   }
 
-  const path = data.map((r, i) => `${i ? "L" : "M"}${X(r.ts).toFixed(1)},${Y(r[spec.field]).toFixed(1)}`).join("");
+  const path = rows.map((r, i) => `${i ? "L" : "M"}${X(r.ts).toFixed(1)},${Y(r[spec.field]).toFixed(1)}`).join("");
   el("path", { d: path, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" });
 
   // Hover layer: crosshair + marker + tooltip across the whole plot area.
@@ -344,19 +363,20 @@ function drawChart(spec) {
     const rect = svg.getBoundingClientRect();
     const ts = xMin + ((ev.clientX - rect.left) * (W / rect.width) - M.left) / iw * (xMax - xMin);
     let best = 0;
-    for (let i = 1; i < data.length; i++) {
-      if (Math.abs(data[i].ts - ts) < Math.abs(data[best].ts - ts)) best = i;
+    for (let i = 1; i < rows.length; i++) {
+      if (Math.abs(rows[i].ts - ts) < Math.abs(rows[best].ts - ts)) best = i;
     }
-    const r = data[best];
+    const r = rows[best];
     const px = X(r.ts), py = Y(r[spec.field]);
     crosshair.setAttribute("x1", px); crosshair.setAttribute("x2", px);
     crosshair.setAttribute("visibility", "visible");
     marker.setAttribute("cx", px); marker.setAttribute("cy", py);
     marker.setAttribute("visibility", "visible");
     const d = new Date(r.ts * 1000);
-    tooltip.innerHTML =
-      `<span class="t">${d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span><br>` +
-      `<span class="v">${fmt(r[spec.field], spec.decimals)} ${spec.unit}</span>`;
+    const when = `<span class="t">${d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span><br>`;
+    tooltip.innerHTML = when + (spec.tooltipHtml
+      ? spec.tooltipHtml(r)
+      : `<span class="v">${fmt(r[spec.field], spec.decimals)} ${spec.unit}</span>`);
     tooltip.style.display = "block";
     const scale = rect.width / W;
     const left = Math.min(px * scale + 14, rect.width - tooltip.offsetWidth - 4);
@@ -517,8 +537,9 @@ async function refreshLatest() {
 }
 
 async function refreshHistory() {
-  [data, dailyData] = await Promise.all([
+  [data, deltaData, dailyData] = await Promise.all([
     (await fetch(`/api/readings?hours=${hours}`)).json(),
+    (await fetch(`/api/delta?hours=${hours}`)).json(),
     (await fetch("/api/daily?days=30")).json(),
   ]);
   drawAll();

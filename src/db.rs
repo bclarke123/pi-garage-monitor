@@ -225,6 +225,40 @@ impl Db {
         rows.next().transpose().map_err(Into::into)
     }
 
+    /// Returns indoor vs outdoor temperature joined into common time buckets.
+    ///
+    /// Buckets with no outdoor observation are omitted, so the result is
+    /// empty until weather polling is enabled.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn temperature_delta(&self, from_ts: i64, bucket_secs: i64) -> Result<Vec<DeltaPoint>> {
+        let bucket_secs = bucket_secs.max(1);
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT i.bucket, i.t, o.t FROM
+               (SELECT (ts / ?2) * ?2 AS bucket, AVG(temperature_c) AS t
+                  FROM readings WHERE ts >= ?1 GROUP BY bucket) i
+               JOIN
+               (SELECT (ts / ?2) * ?2 AS bucket, AVG(temperature_c) AS t
+                  FROM outdoor WHERE ts >= ?1 GROUP BY bucket) o
+               USING (bucket)
+             ORDER BY i.bucket",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![from_ts, bucket_secs], |row| {
+            let indoor_c: f64 = row.get(1)?;
+            let outdoor_c: f64 = row.get(2)?;
+            Ok(DeltaPoint {
+                ts: row.get(0)?,
+                indoor_c,
+                outdoor_c,
+                delta_c: indoor_c - outdoor_c,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     /// Summarizes condensation risk per local calendar day at or after `from_ts`.
     ///
     /// Streams the raw readings and, for each day, tallies how long indoor
@@ -332,6 +366,19 @@ impl Db {
         // A poisoned mutex means another thread already panicked; stop too.
         self.conn.lock().expect("database mutex poisoned")
     }
+}
+
+/// Indoor and outdoor temperature averaged over one shared time bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct DeltaPoint {
+    /// Bucket start as a Unix timestamp in seconds.
+    pub ts: i64,
+    /// Average indoor temperature over the bucket, in °C.
+    pub indoor_c: f64,
+    /// Average outdoor temperature over the bucket, in °C.
+    pub outdoor_c: f64,
+    /// Indoor minus outdoor, in °C (positive = warmer inside).
+    pub delta_c: f64,
 }
 
 /// One local-calendar-day's retroactive condensation-risk summary.
@@ -472,6 +519,28 @@ mod tests {
         assert!((days[0].min_c - 5.0).abs() < f64::EPSILON);
         assert!((days[0].max_c - 15.0).abs() < f64::EPSILON);
         assert!((days[1].min_c - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn temperature_delta_joins_matching_buckets_only() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert(&reading(100, 15.0)).unwrap();
+        db.insert(&reading(200, 17.0)).unwrap();
+        // Outdoor data exists for the first 900s bucket only.
+        db.insert_outdoor(&OutdoorReading {
+            ts: 150,
+            temperature_c: 10.0,
+            humidity_pct: 70.0,
+            dew_point_c: 4.0,
+        })
+        .unwrap();
+        db.insert(&reading(2000, 20.0)).unwrap(); // second bucket, no outdoor
+
+        let points = db.temperature_delta(0, 900).unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].ts, 0);
+        assert!((points[0].indoor_c - 16.0).abs() < f64::EPSILON);
+        assert!((points[0].delta_c - 6.0).abs() < f64::EPSILON);
     }
 
     #[test]
