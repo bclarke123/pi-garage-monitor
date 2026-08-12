@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS outdoor (
     ts            INTEGER NOT NULL,
     temperature_c REAL NOT NULL,
     humidity_pct  REAL NOT NULL,
-    dew_point_c   REAL NOT NULL
+    dew_point_c   REAL NOT NULL,
+    pressure_hpa  REAL
 );
 CREATE INDEX IF NOT EXISTS outdoor_ts ON outdoor (ts);
 CREATE TABLE IF NOT EXISTS events (
@@ -78,6 +79,7 @@ impl Db {
 
     fn from_connection(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA).context("applying schema")?;
+        ensure_outdoor_pressure_column(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -269,13 +271,14 @@ impl Db {
     /// Returns an error if the insert fails.
     pub fn insert_outdoor(&self, outdoor: &OutdoorReading) -> Result<()> {
         self.lock().execute(
-            "INSERT INTO outdoor (ts, temperature_c, humidity_pct, dew_point_c)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO outdoor (ts, temperature_c, humidity_pct, dew_point_c, pressure_hpa)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 outdoor.ts,
                 outdoor.temperature_c,
                 outdoor.humidity_pct,
-                outdoor.dew_point_c
+                outdoor.dew_point_c,
+                outdoor.pressure_hpa
             ],
         )?;
         Ok(())
@@ -288,7 +291,7 @@ impl Db {
     pub fn latest_outdoor(&self) -> Result<Option<OutdoorReading>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT ts, temperature_c, humidity_pct, dew_point_c
+            "SELECT ts, temperature_c, humidity_pct, dew_point_c, pressure_hpa
              FROM outdoor ORDER BY ts DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map([], |row| {
@@ -297,6 +300,7 @@ impl Db {
                 temperature_c: row.get(1)?,
                 humidity_pct: row.get(2)?,
                 dew_point_c: row.get(3)?,
+                pressure_hpa: row.get(4)?,
             })
         })?;
         rows.next().transpose().map_err(Into::into)
@@ -490,6 +494,9 @@ pub struct OutdoorReading {
     pub humidity_pct: f64,
     /// Outdoor dew point in degrees Celsius.
     pub dew_point_c: f64,
+    /// Outdoor station pressure in hectopascals; absent on rows stored
+    /// before the column existed.
+    pub pressure_hpa: Option<f64>,
 }
 
 /// A record value and when it was observed.
@@ -538,6 +545,19 @@ pub struct Event {
     pub ts: i64,
     /// Short human-readable description.
     pub label: String,
+}
+
+/// Adds the outdoor pressure column to databases created before it existed.
+fn ensure_outdoor_pressure_column(conn: &Connection) -> Result<()> {
+    let has_column: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('outdoor') WHERE name = 'pressure_hpa'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_column == 0 {
+        conn.execute("ALTER TABLE outdoor ADD COLUMN pressure_hpa REAL", [])?;
+    }
+    Ok(())
 }
 
 fn row_to_reading(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reading> {
@@ -635,6 +655,7 @@ mod tests {
             temperature_c: 25.0,
             humidity_pct: 50.0,
             dew_point_c: 10.0,
+            pressure_hpa: None,
         })
         .unwrap();
         db.insert(&reading(DAY + DAY / 2, 16.0)).unwrap(); // no outdoor this day
@@ -655,6 +676,7 @@ mod tests {
             temperature_c: 10.0,
             humidity_pct: 70.0,
             dew_point_c: 4.0,
+            pressure_hpa: Some(1009.0),
         })
         .unwrap();
         db.insert(&reading(2000, 20.0)).unwrap(); // second bucket, no outdoor
@@ -693,6 +715,7 @@ mod tests {
             temperature_c: 22.0,
             humidity_pct: 80.0,
             dew_point_c: 15.0,
+            pressure_hpa: Some(1010.0),
         })
         .unwrap();
 

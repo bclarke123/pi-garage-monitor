@@ -64,6 +64,7 @@
   }
 
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body.viz-root {
     margin: 0;
     background: var(--page);
@@ -93,22 +94,23 @@
     border-radius: 10px;
     padding: 14px 16px;
   }
-  .tile .label { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 7px; }
-  .tile .swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
-  .tile .value { font-size: 32px; font-weight: 600; margin-top: 4px; }
-  .tile .value small { font-size: 16px; font-weight: 500; color: var(--text-secondary); }
-  .tile .sub {
-    font-size: 12px; color: var(--text-muted); margin-top: 4px;
-    display: grid; grid-template-columns: auto auto; justify-content: start;
-    column-gap: 10px; row-gap: 2px;
+  .tile .label {
+    font-size: 13px; color: var(--text-secondary);
+    border-bottom: 1px solid var(--grid);
+    padding-bottom: 8px; margin-bottom: 8px;
   }
-  .tile .sub .sv { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .tile .pair {
+    display: grid; grid-template-columns: auto 1fr;
+    column-gap: 12px; row-gap: 2px; align-items: start; margin-top: 6px;
+  }
+  .tile .pair .row { display: contents; }
+  .tile .pair .k { font-size: 12px; color: var(--text-secondary); padding-top: 5px; }
+  .tile .pair .v { font-size: 32px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
 
   .filters { display: flex; gap: 6px; margin: 4px 0 14px; align-items: center; }
   .filters .spacer { flex: 1; }
   .pi-temp { color: var(--text-muted); font-size: 13px; margin-right: 10px; }
   .event-form { display: flex; gap: 6px; margin: -6px 0 14px; flex-wrap: wrap; }
-  .event-form[hidden] { display: none; }
   .event-form input, .event-form button {
     font: inherit; font-size: 13px;
     color: var(--text-primary);
@@ -217,25 +219,32 @@
 
   <div class="tiles">
     <div class="tile">
-      <div class="label"><span class="swatch" style="background:var(--series-temp)"></span>Temperature</div>
-      <div class="value" id="tile-temp">–</div>
+      <div class="label">Temperature (°C)</div>
+      <div class="pair">
+        <span class="k">Indoor</span><span class="v" id="tile-temp">–</span>
+        <div class="row" id="tile-temp-sub" hidden><span class="k">Outdoor</span><span class="v" id="tile-temp-out"></span></div>
+      </div>
     </div>
     <div class="tile">
-      <div class="label"><span class="swatch" style="background:var(--series-hum)"></span>Humidity</div>
-      <div class="value" id="tile-hum">–</div>
+      <div class="label">Humidity (%)</div>
+      <div class="pair">
+        <span class="k">Indoor</span><span class="v" id="tile-hum">–</span>
+        <div class="row" id="tile-hum-sub" hidden><span class="k">Outdoor</span><span class="v" id="tile-hum-out"></span></div>
+      </div>
     </div>
     <div class="tile">
-      <div class="label"><span class="swatch" style="background:var(--series-pres)"></span>Pressure</div>
-      <div class="value" id="tile-pres">–</div>
+      <div class="label">Dew point (°C)</div>
+      <div class="pair">
+        <span class="k">Indoor</span><span class="v" id="tile-dew">–</span>
+        <div class="row" id="tile-dew-sub" hidden><span class="k">Outdoor</span><span class="v" id="tile-dew-out"></span></div>
+      </div>
     </div>
-    <div class="tile" id="tile-dew-card" hidden>
-      <div class="label">Indoor dew point</div>
-      <div class="value" id="tile-dew">–</div>
-    </div>
-    <div class="tile" id="tile-out-card" hidden>
-      <div class="label">Outdoor</div>
-      <div class="value" id="tile-out">–</div>
-      <div class="sub" id="tile-out-sub"></div>
+    <div class="tile">
+      <div class="label">Pressure (hPa)</div>
+      <div class="pair">
+        <span class="k">Indoor</span><span class="v" id="tile-pres">–</span>
+        <div class="row" id="tile-pres-sub" hidden><span class="k">Outdoor</span><span class="v" id="tile-pres-out"></span></div>
+      </div>
     </div>
   </div>
 
@@ -652,6 +661,12 @@ async function refreshLatest() {
   const r = c.indoor;
   document.getElementById("pi-temp").textContent =
     c.cpu_temp_c === null || c.cpu_temp_c === undefined ? "" : `Pi ${fmt(c.cpu_temp_c, 0)} °C · `;
+  const setTile = (key, indoorText, outdoorText) => {
+    document.getElementById(`tile-${key}`).textContent = indoorText;
+    const row = document.getElementById(`tile-${key}-sub`);
+    row.hidden = !outdoorText;
+    if (outdoorText) document.getElementById(`tile-${key}-out`).textContent = outdoorText;
+  };
   if (!r) { updated.textContent = "no readings yet"; return; }
   // A quietly aging timestamp is easy to miss; make staleness loud.
   const age = Date.now() / 1000 - r.ts;
@@ -662,9 +677,14 @@ async function refreshLatest() {
     updated.textContent = `updated ${timeAgo(r.ts)}`;
     updated.style.color = "";
   }
-  document.getElementById("tile-temp").innerHTML = `${fmt(r.temperature_c, 1)} <small>°C</small>`;
-  document.getElementById("tile-hum").innerHTML = `${fmt(r.humidity_pct, 0)} <small>%</small>`;
-  document.getElementById("tile-pres").innerHTML = `${fmt(r.pressure_hpa, 1)} <small>hPa</small>`;
+  const o = c.outdoor;
+  hasOutdoor = Boolean(o);
+  setTile("temp", fmt(r.temperature_c, 1), o && fmt(o.temperature_c, 1));
+  setTile("hum", fmt(r.humidity_pct, 0), o && fmt(o.humidity_pct, 0));
+  setTile("pres", fmt(r.pressure_hpa, 1),
+    o && (o.pressure_hpa === null ? null : fmt(o.pressure_hpa, 1)));
+  setTile("dew", c.status ? fmt(c.status.indoor_dew_point_c, 1) : "–",
+    o && fmt(o.dew_point_c, 1));
 
   if (c.status) {
     const s = STATUS[c.status.level];
@@ -674,22 +694,6 @@ async function refreshLatest() {
     document.getElementById("banner-icon").textContent = s.icon;
     document.getElementById("banner-label").textContent = s.label;
     document.getElementById("banner-msg").textContent = c.status.message;
-    document.getElementById("tile-dew-card").hidden = false;
-    document.getElementById("tile-dew").innerHTML =
-      `${fmt(c.status.indoor_dew_point_c, 1)} <small>°C</small>`;
-  }
-
-  const outCard = document.getElementById("tile-out-card");
-  hasOutdoor = Boolean(c.outdoor);
-  if (c.outdoor) {
-    outCard.hidden = false;
-    document.getElementById("tile-out").innerHTML =
-      `${fmt(c.outdoor.temperature_c, 1)} <small>°C</small>`;
-    document.getElementById("tile-out-sub").innerHTML =
-      `<span>Dew point</span><span class="sv">${fmt(c.outdoor.dew_point_c, 1)} °C</span>` +
-      `<span>Rel. humidity</span><span class="sv">${fmt(c.outdoor.humidity_pct, 0)}%</span>`;
-  } else {
-    outCard.hidden = true;
   }
 }
 

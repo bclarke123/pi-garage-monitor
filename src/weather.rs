@@ -81,12 +81,13 @@ struct ApiCurrent {
     relative_humidity: f64,
     #[serde(rename = "dew_point_2m")]
     dew_point: f64,
+    surface_pressure: f64,
 }
 
 fn fetch_current(coordinates: Coordinates) -> Result<OutdoorReading> {
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}\
-         &current=temperature_2m,relative_humidity_2m,dew_point_2m",
+         &current=temperature_2m,relative_humidity_2m,dew_point_2m,surface_pressure",
         coordinates.latitude, coordinates.longitude
     );
     let mut response = ureq::get(&url).call().context("requesting Open-Meteo")?;
@@ -99,6 +100,7 @@ fn fetch_current(coordinates: Coordinates) -> Result<OutdoorReading> {
         temperature_c: body.current.temperature,
         humidity_pct: body.current.relative_humidity,
         dew_point_c: body.current.dew_point,
+        pressure_hpa: Some(body.current.surface_pressure),
     })
 }
 
@@ -241,6 +243,7 @@ mod tests {
             temperature_c: 20.0,
             humidity_pct: 80.0,
             dew_point_c,
+            pressure_hpa: Some(1010.0),
         }
     }
 
