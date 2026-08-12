@@ -1,0 +1,297 @@
+// Rust guideline compliant 2026-08-12
+//! Outdoor weather polling and condensation-risk assessment.
+//!
+//! [`run_poller`] fetches current outdoor conditions (including dew point)
+//! from the free, keyless [Open-Meteo](https://open-meteo.com/) API and
+//! stores them alongside the indoor readings. [`assess`] combines indoor
+//! and outdoor state into a dashboard warning: condensation — warm humid
+//! air meeting cold surfaces — is what actually destroys electronics in a
+//! semi-conditioned space, more than cold itself.
+
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+use crate::db::{Db, OutdoorReading, Reading};
+use crate::unix_ts_now;
+
+/// How often to poll Open-Meteo.
+///
+/// The API's model output only refreshes every ~15 minutes, so polling
+/// faster wastes their goodwill (it is free and keyless) for no new data.
+const POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Location to fetch outdoor weather for.
+#[derive(Debug, Clone, Copy)]
+pub struct Coordinates {
+    /// Degrees north of the equator (negative for south).
+    pub latitude: f64,
+    /// Degrees east of Greenwich (negative for west).
+    pub longitude: f64,
+}
+
+/// Polls Open-Meteo every [`POLL_INTERVAL`] forever, storing results in `db`.
+///
+/// Fetch failures are logged and skipped; the garage's own sensor keeps
+/// working regardless of internet weather (pun intended).
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the poller thread owns its Db handle for the process lifetime"
+)]
+pub fn run_poller(coordinates: Coordinates, db: Db) {
+    loop {
+        match fetch_current(coordinates) {
+            Ok(outdoor) => match db.insert_outdoor(&outdoor) {
+                Ok(()) => tracing::event!(
+                    name: "weather.fetch.success",
+                    tracing::Level::INFO,
+                    outdoor.temperature_c = outdoor.temperature_c,
+                    outdoor.dew_point_c = outdoor.dew_point_c,
+                    "stored outdoor reading",
+                ),
+                Err(error) => tracing::event!(
+                    name: "weather.store.failure",
+                    tracing::Level::ERROR,
+                    error.message = %error,
+                    "failed to store outdoor reading",
+                ),
+            },
+            Err(error) => tracing::event!(
+                name: "weather.fetch.failure",
+                tracing::Level::WARN,
+                error.message = %error,
+                "weather fetch failed; will retry next interval",
+            ),
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiResponse {
+    current: ApiCurrent,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiCurrent {
+    #[serde(rename = "temperature_2m")]
+    temperature: f64,
+    #[serde(rename = "relative_humidity_2m")]
+    relative_humidity: f64,
+    #[serde(rename = "dew_point_2m")]
+    dew_point: f64,
+}
+
+fn fetch_current(coordinates: Coordinates) -> Result<OutdoorReading> {
+    let url = format!(
+        "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}\
+         &current=temperature_2m,relative_humidity_2m,dew_point_2m",
+        coordinates.latitude, coordinates.longitude
+    );
+    let mut response = ureq::get(&url).call().context("requesting Open-Meteo")?;
+    let body: ApiResponse = response
+        .body_mut()
+        .read_json()
+        .context("parsing Open-Meteo response")?;
+    Ok(OutdoorReading {
+        ts: unix_ts_now(),
+        temperature_c: body.current.temperature,
+        humidity_pct: body.current.relative_humidity,
+        dew_point_c: body.current.dew_point,
+    })
+}
+
+/// Computes the dew point in °C from temperature and relative humidity.
+///
+/// Uses the Magnus approximation (accurate to ~0.1 °C over -45..60 °C).
+#[must_use]
+pub fn dew_point_c(temperature_c: f64, humidity_pct: f64) -> f64 {
+    // Magnus coefficients (Sonntag 1990).
+    const A: f64 = 17.62;
+    const B: f64 = 243.12;
+    let humidity = (humidity_pct / 100.0).clamp(0.001, 1.0);
+    let gamma = humidity.ln() + A * temperature_c / (B + temperature_c);
+    B * gamma / (A - gamma)
+}
+
+/// Severity of a condensation assessment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    /// No condensation risk.
+    Ok,
+    /// Conditions are drifting toward condensation.
+    Warning,
+    /// Condensation is likely happening now.
+    Critical,
+}
+
+/// A condensation-risk verdict for the dashboard banner.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Assessment {
+    /// Severity level.
+    pub level: Level,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Indoor dew point in °C, derived from the latest indoor reading.
+    pub indoor_dew_point_c: f64,
+    /// How far indoor air is from saturating, in °C.
+    pub dew_point_spread_c: f64,
+}
+
+/// Assesses condensation risk from indoor conditions and, when available,
+/// outdoor conditions.
+///
+/// The two failure modes it watches for:
+/// - indoor air already near saturation (spread between temperature and
+///   dew point closing to zero — moisture will film onto every surface);
+/// - outdoor dew point above indoor temperature (opening the door lets air
+///   in that will condense onto still-cold contents).
+#[must_use]
+pub fn assess(indoor: &Reading, outdoor: Option<&OutdoorReading>) -> Assessment {
+    // Spreads below these thresholds are the standard "condensation watch"
+    // bands used in HVAC practice; 1 °C is effectively saturated once
+    // sensor error (±0.5 °C) is accounted for.
+    const SPREAD_CRITICAL_C: f64 = 1.0;
+    const SPREAD_WARNING_C: f64 = 3.0;
+
+    let indoor_dew_point_c = dew_point_c(indoor.temperature_c, indoor.humidity_pct);
+    let dew_point_spread_c = indoor.temperature_c - indoor_dew_point_c;
+
+    let (level, message) = if dew_point_spread_c < SPREAD_CRITICAL_C {
+        (
+            Level::Critical,
+            "Indoor air is saturated — condensation is likely forming on surfaces right now."
+                .to_owned(),
+        )
+    } else if dew_point_spread_c < SPREAD_WARNING_C {
+        (
+            Level::Warning,
+            format!(
+                "Indoor air is near saturation (only {dew_point_spread_c:.1} °C above the dew \
+                 point) — condensation risk on cold surfaces."
+            ),
+        )
+    } else if let Some(outdoor) = outdoor.filter(|o| o.dew_point_c > indoor.temperature_c) {
+        (
+            Level::Warning,
+            format!(
+                "Outdoor dew point ({:.1} °C) is above the indoor temperature ({:.1} °C) — \
+                 incoming air will condense on anything in here. Keep the space closed up.",
+                outdoor.dew_point_c, indoor.temperature_c
+            ),
+        )
+    } else {
+        (Level::Ok, "No condensation risk.".to_owned())
+    };
+
+    Assessment {
+        level,
+        message,
+        indoor_dew_point_c,
+        dew_point_spread_c,
+    }
+}
+
+/// Classifies one past day's condensation risk from its aggregates.
+///
+/// `max_outdoor_dew_point_c` is compared against the day's *minimum* indoor
+/// temperature: surfaces lag air temperature, so the daily low is the best
+/// proxy for how cold the room's contents got.
+#[must_use]
+pub fn assess_day(
+    saturated_minutes: u32,
+    near_saturation_minutes: u32,
+    min_temperature_c: f64,
+    max_outdoor_dew_point_c: Option<f64>,
+) -> Level {
+    // A few saturated minutes can be sensor noise around a real spread of
+    // ~1 °C; a quarter hour near saturation is a genuine damp spell.
+    const SATURATED_CRITICAL_MINUTES: u32 = 5;
+    const NEAR_SATURATION_WARNING_MINUTES: u32 = 15;
+
+    let incoming_air_risk =
+        max_outdoor_dew_point_c.is_some_and(|dew_point| dew_point > min_temperature_c);
+    if saturated_minutes >= SATURATED_CRITICAL_MINUTES {
+        Level::Critical
+    } else if near_saturation_minutes >= NEAR_SATURATION_WARNING_MINUTES || incoming_air_risk {
+        Level::Warning
+    } else {
+        Level::Ok
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn indoor(temperature_c: f64, humidity_pct: f64) -> Reading {
+        Reading {
+            ts: 0,
+            temperature_c,
+            humidity_pct,
+            pressure_hpa: 1013.0,
+        }
+    }
+
+    fn outdoor(dew_point_c: f64) -> OutdoorReading {
+        OutdoorReading {
+            ts: 0,
+            temperature_c: 20.0,
+            humidity_pct: 80.0,
+            dew_point_c,
+        }
+    }
+
+    #[test]
+    fn dew_point_matches_reference_values() {
+        // Reference: 20 °C at 50% RH → dew point ≈ 9.3 °C.
+        assert!((dew_point_c(20.0, 50.0) - 9.3).abs() < 0.1);
+        // Saturated air: dew point equals temperature.
+        assert!((dew_point_c(15.0, 100.0) - 15.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn saturated_indoor_air_is_critical() {
+        let a = assess(&indoor(12.0, 99.0), None);
+        assert_eq!(a.level, Level::Critical);
+    }
+
+    #[test]
+    fn near_saturated_indoor_air_is_warning() {
+        let a = assess(&indoor(12.0, 88.0), None);
+        assert_eq!(a.level, Level::Warning);
+        assert!(a.message.contains("near saturation"));
+    }
+
+    #[test]
+    fn humid_outdoor_air_above_indoor_temperature_is_warning() {
+        let a = assess(&indoor(12.0, 50.0), Some(&outdoor(15.0)));
+        assert_eq!(a.level, Level::Warning);
+        assert!(a.message.contains("Outdoor dew point"));
+    }
+
+    #[test]
+    fn day_with_sustained_saturation_is_critical() {
+        assert_eq!(assess_day(10, 60, 5.0, None), Level::Critical);
+    }
+
+    #[test]
+    fn day_with_damp_spell_or_humid_outdoor_air_is_warning() {
+        assert_eq!(assess_day(0, 30, 5.0, None), Level::Warning);
+        assert_eq!(assess_day(0, 0, 10.0, Some(14.0)), Level::Warning);
+    }
+
+    #[test]
+    fn brief_blips_and_dry_days_are_ok() {
+        assert_eq!(assess_day(2, 10, 10.0, Some(4.0)), Level::Ok);
+    }
+
+    #[test]
+    fn dry_conditions_are_ok() {
+        let a = assess(&indoor(20.0, 50.0), Some(&outdoor(5.0)));
+        assert_eq!(a.level, Level::Ok);
+        assert!(a.dew_point_spread_c > 3.0);
+    }
+}

@@ -73,6 +73,7 @@
   .tile .swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
   .tile .value { font-size: 32px; font-weight: 600; margin-top: 4px; }
   .tile .value small { font-size: 16px; font-weight: 500; color: var(--text-secondary); }
+  .tile .sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
 
   .filters { display: flex; gap: 6px; margin: 4px 0 14px; }
   .filters button {
@@ -120,6 +121,39 @@
   .tooltip .t { color: var(--text-muted); }
   .tooltip .v { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
 
+  /* Status colors are fixed (never themed); meaning is carried by the
+     icon shape + label, never color alone. */
+  .banner {
+    display: flex; align-items: baseline; gap: 10px;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--status, var(--border));
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin: 16px 0 0;
+    font-size: 14px;
+  }
+  .banner .icon { color: var(--status); font-weight: 700; }
+  .banner b { margin-right: 4px; }
+  .banner span.msg { color: var(--text-secondary); }
+
+  .risk-summary { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+  .risk-row {
+    display: flex; align-items: baseline; gap: 10px;
+    border-top: 1px solid var(--grid);
+    padding: 7px 0;
+    font-size: 13px;
+  }
+  .risk-row .badge { font-weight: 700; white-space: nowrap; }
+  .risk-row .date { font-weight: 600; white-space: nowrap; }
+  .risk-row .detail { color: var(--text-secondary); }
+
+  .recgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; padding-bottom: 6px; }
+  .rec .k { font-size: 12px; color: var(--text-secondary); }
+  .rec .v { font-size: 18px; font-weight: 600; margin: 2px 0; }
+  .rec .v small { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+  .rec .when { font-size: 12px; color: var(--text-muted); }
+
   svg text { font-family: inherit; font-size: 11px; fill: var(--text-muted); font-variant-numeric: tabular-nums; }
 </style>
 </head>
@@ -129,6 +163,11 @@
     <h1>Garage Monitor</h1>
     <span id="updated">loading…</span>
   </header>
+
+  <div class="banner" id="banner" hidden>
+    <span class="icon" id="banner-icon"></span>
+    <div><b id="banner-label"></b><span class="msg" id="banner-msg"></span></div>
+  </div>
 
   <div class="tiles">
     <div class="tile">
@@ -143,6 +182,15 @@
       <div class="label"><span class="swatch" style="background:var(--series-pres)"></span>Pressure</div>
       <div class="value" id="tile-pres">–</div>
     </div>
+    <div class="tile" id="tile-dew-card" hidden>
+      <div class="label">Indoor dew point</div>
+      <div class="value" id="tile-dew">–</div>
+    </div>
+    <div class="tile" id="tile-out-card" hidden>
+      <div class="label">Outdoor</div>
+      <div class="value" id="tile-out">–</div>
+      <div class="sub" id="tile-out-sub"></div>
+    </div>
   </div>
 
   <div class="filters" id="filters" role="group" aria-label="Time range">
@@ -152,9 +200,21 @@
     <button data-hours="720" aria-pressed="false">30d</button>
   </div>
 
+  <div class="card" id="records-card" hidden>
+    <h2>All-time records</h2>
+    <div class="recgrid" id="recgrid"></div>
+  </div>
+
   <div class="card" id="chart-temp"><h2>Temperature (°C)</h2></div>
   <div class="card" id="chart-hum"><h2>Relative humidity (%)</h2></div>
   <div class="card" id="chart-pres"><h2>Pressure (hPa)</h2></div>
+  <div class="card" id="chart-daily"><h2>Daily highs &amp; lows (°C, last 30 days)</h2></div>
+
+  <div class="card" id="risk-card" hidden>
+    <h2>Condensation history (last 30 days)</h2>
+    <div id="risk-summary" class="risk-summary"></div>
+    <div id="risk-rows"></div>
+  </div>
 </main>
 
 <script>
@@ -171,6 +231,12 @@ let data = [];
 
 function fmt(v, d) {
   return v.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+// Axis ticks skip digit grouping ("1013.3", not "1,013.3") so they stay
+// compact inside the fixed left margin.
+function fmtTick(v, d) {
+  return v.toLocaleString(undefined, { useGrouping: false, minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
 function timeAgo(ts) {
@@ -249,7 +315,7 @@ function drawChart(spec) {
     const y = Y(t);
     el("line", { x1: M.left, x2: M.left + iw, y1: y, y2: y, stroke: gridColor, "stroke-width": 1 });
     const label = el("text", { x: M.left - 7, y: y + 3.5, "text-anchor": "end" });
-    label.textContent = fmt(t, tickDecimals);
+    label.textContent = fmtTick(t, tickDecimals);
   }
   el("line", { x1: M.left, x2: M.left + iw, y1: M.top + ih, y2: M.top + ih, stroke: axisColor, "stroke-width": 1 });
 
@@ -306,21 +372,178 @@ function drawChart(spec) {
   card.appendChild(svg);
 }
 
-function drawAll() { CHARTS.forEach(drawChart); }
+let dailyData = [];
+
+function localDate(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function drawDaily() {
+  const card = document.getElementById("chart-daily");
+  card.querySelectorAll("svg, .empty, .tooltip").forEach(n => n.remove());
+
+  if (dailyData.length === 0) {
+    const p = document.createElement("div");
+    p.className = "empty";
+    p.textContent = "Not enough data yet — daily ranges appear after the first day.";
+    card.appendChild(p);
+    return;
+  }
+
+  const css = getComputedStyle(card);
+  const color = css.getPropertyValue("--series-temp").trim();
+  const gridColor = css.getPropertyValue("--grid").trim();
+  const axisColor = css.getPropertyValue("--axis").trim();
+
+  const W = card.clientWidth - 32, H = 180;
+  const M = { top: 8, right: 12, bottom: 22, left: 44 };
+  const iw = W - M.left - M.right, ih = H - M.top - M.bottom;
+
+  let vMin = Math.min(...dailyData.map(d => d.min_c));
+  let vMax = Math.max(...dailyData.map(d => d.max_c));
+  const pad = (vMax - vMin) * 0.12 || 1;
+  vMin -= pad; vMax += pad;
+  const Y = v => M.top + ih - ((v - vMin) / (vMax - vMin)) * ih;
+
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const el = (tag, attrs) => {
+    const n = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    svg.appendChild(n);
+    return n;
+  };
+
+  const yTicks = niceTicks(vMin, vMax, 4);
+  const step = yTicks.length > 1 ? yTicks[1] - yTicks[0] : 1;
+  const tickDecimals = Math.max(1, Math.max(0, -Math.floor(Math.log10(step))));
+  for (const t of yTicks) {
+    const y = Y(t);
+    el("line", { x1: M.left, x2: M.left + iw, y1: y, y2: y, stroke: gridColor, "stroke-width": 1 });
+    const label = el("text", { x: M.left - 7, y: y + 3.5, "text-anchor": "end" });
+    label.textContent = fmtTick(t, tickDecimals);
+  }
+  el("line", { x1: M.left, x2: M.left + iw, y1: M.top + ih, y2: M.top + ih, stroke: axisColor, "stroke-width": 1 });
+
+  // One rounded range bar per day, with a 2px gap between neighbors.
+  const slot = iw / dailyData.length;
+  const bw = Math.max(2, Math.min(18, slot - 2));
+  const bars = dailyData.map((d, i) => {
+    const x = M.left + slot * i + (slot - bw) / 2;
+    const yTop = Y(d.max_c);
+    const h = Math.max(2, Y(d.min_c) - yTop);
+    el("rect", { x, y: yTop, width: bw, height: h, rx: Math.min(4, bw / 2), fill: color });
+    return { x, cx: x + bw / 2 };
+  });
+
+  const nLabels = Math.max(2, Math.floor(iw / 130));
+  for (let i = 0; i < nLabels; i++) {
+    const idx = Math.round((dailyData.length - 1) * i / (nLabels - 1));
+    const label = el("text", {
+      x: bars[idx].cx, y: M.top + ih + 15,
+      "text-anchor": i === 0 ? "start" : i === nLabels - 1 ? "end" : "middle",
+    });
+    label.textContent = localDate(dailyData[idx].date)
+      .toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+
+  const tooltip = document.createElement("div");
+  tooltip.className = "tooltip";
+  card.appendChild(tooltip);
+
+  const overlay = el("rect", { x: M.left, y: M.top, width: iw, height: ih, fill: "transparent" });
+  overlay.addEventListener("mousemove", ev => {
+    const rect = svg.getBoundingClientRect();
+    const px = (ev.clientX - rect.left) * (W / rect.width);
+    const idx = Math.max(0, Math.min(dailyData.length - 1, Math.floor((px - M.left) / slot)));
+    const d = dailyData[idx];
+    tooltip.innerHTML =
+      `<span class="t">${localDate(d.date).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</span><br>` +
+      `<span class="v">High ${fmt(d.max_c, 1)} °C · Low ${fmt(d.min_c, 1)} °C</span>`;
+    tooltip.style.display = "block";
+    const scale = rect.width / W;
+    const left = Math.min(bars[idx].cx * scale + 14, rect.width - tooltip.offsetWidth - 4);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${Y(d.max_c) * scale + 18}px`;
+  });
+  overlay.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+
+  card.appendChild(svg);
+}
+
+function drawAll() { CHARTS.forEach(drawChart); drawDaily(); }
+
+const STATUS = {
+  ok:       { color: "#0ca30c", icon: "✓", label: "OK" },
+  warning:  { color: "#fab219", icon: "▲", label: "Caution" },
+  critical: { color: "#d03b3b", icon: "✕", label: "Condensation risk" },
+};
 
 async function refreshLatest() {
-  const r = await (await fetch("/api/latest")).json();
+  const c = await (await fetch("/api/conditions")).json();
   const updated = document.getElementById("updated");
+  const r = c.indoor;
   if (!r) { updated.textContent = "no readings yet"; return; }
   updated.textContent = `updated ${timeAgo(r.ts)}`;
   document.getElementById("tile-temp").innerHTML = `${fmt(r.temperature_c, 1)} <small>°C</small>`;
   document.getElementById("tile-hum").innerHTML = `${fmt(r.humidity_pct, 0)} <small>%</small>`;
   document.getElementById("tile-pres").innerHTML = `${fmt(r.pressure_hpa, 1)} <small>hPa</small>`;
+
+  if (c.status) {
+    const s = STATUS[c.status.level];
+    const banner = document.getElementById("banner");
+    banner.hidden = false;
+    banner.style.setProperty("--status", s.color);
+    document.getElementById("banner-icon").textContent = s.icon;
+    document.getElementById("banner-label").textContent = s.label;
+    document.getElementById("banner-msg").textContent = c.status.message;
+    document.getElementById("tile-dew-card").hidden = false;
+    document.getElementById("tile-dew").innerHTML =
+      `${fmt(c.status.indoor_dew_point_c, 1)} <small>°C</small>`;
+  }
+
+  const outCard = document.getElementById("tile-out-card");
+  if (c.outdoor) {
+    outCard.hidden = false;
+    document.getElementById("tile-out").innerHTML =
+      `${fmt(c.outdoor.temperature_c, 1)} <small>°C</small>`;
+    document.getElementById("tile-out-sub").textContent =
+      `dew point ${fmt(c.outdoor.dew_point_c, 1)} °C · ${fmt(c.outdoor.humidity_pct, 0)}% RH`;
+  } else {
+    outCard.hidden = true;
+  }
 }
 
 async function refreshHistory() {
-  data = await (await fetch(`/api/readings?hours=${hours}`)).json();
+  [data, dailyData] = await Promise.all([
+    (await fetch(`/api/readings?hours=${hours}`)).json(),
+    (await fetch("/api/daily?days=30")).json(),
+  ]);
   drawAll();
+}
+
+const REC_ROWS = [
+  ["highest_temperature_c", "Record high", "°C", 1],
+  ["lowest_temperature_c", "Record low", "°C", 1],
+  ["highest_humidity_pct", "Most humid", "%", 0],
+  ["lowest_humidity_pct", "Driest", "%", 0],
+];
+
+async function refreshRecords() {
+  const rec = await (await fetch("/api/records")).json();
+  const card = document.getElementById("records-card");
+  if (!rec) { card.hidden = true; return; }
+  card.hidden = false;
+  document.getElementById("recgrid").innerHTML = REC_ROWS.map(([key, label, unit, dec]) => {
+    const e = rec[key];
+    const when = new Date(e.ts * 1000).toLocaleString(undefined,
+      { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    return `<div class="rec"><div class="k">${label}</div>` +
+      `<div class="v">${fmt(e.value, dec)} <small>${unit}</small></div>` +
+      `<div class="when">${when}</div></div>`;
+  }).join("");
 }
 
 document.getElementById("filters").addEventListener("click", ev => {
@@ -340,9 +563,43 @@ window.addEventListener("resize", () => {
 });
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
 
+async function refreshRisk() {
+  const days = await (await fetch("/api/risk?days=30")).json();
+  const card = document.getElementById("risk-card");
+  if (days.length === 0) { card.hidden = true; return; }
+  card.hidden = false;
+  const flagged = days.filter(d => d.level !== "ok");
+  document.getElementById("risk-summary").textContent =
+    flagged.length === 0
+      ? `All clear — no condensation risk in the last ${days.length} day${days.length > 1 ? "s" : ""}.`
+      : `${days.length - flagged.length} of ${days.length} days clear.`;
+  document.getElementById("risk-rows").innerHTML = flagged
+    .slice()               // newest first
+    .reverse()
+    .map(d => {
+      const s = STATUS[d.level];
+      const details = [];
+      if (d.saturated_minutes > 0) details.push(`${d.saturated_minutes} min saturated`);
+      if (d.near_saturation_minutes > 0) details.push(`${d.near_saturation_minutes} min near saturation`);
+      details.push(`peak ${fmt(d.max_humidity_pct, 0)}% RH`);
+      if (d.max_outdoor_dew_point_c !== null && d.max_outdoor_dew_point_c > d.min_temperature_c) {
+        details.push(`outdoor dew ${fmt(d.max_outdoor_dew_point_c, 1)} °C vs ${fmt(d.min_temperature_c, 1)} °C indoor low`);
+      }
+      const date = localDate(d.date).toLocaleDateString(undefined,
+        { weekday: "short", month: "short", day: "numeric" });
+      return `<div class="risk-row">` +
+        `<span class="badge" style="color:${s.color}">${s.icon} ${s.label}</span>` +
+        `<span class="date">${date}</span>` +
+        `<span class="detail">${details.join(" · ")}</span></div>`;
+    })
+    .join("");
+}
+
 refreshLatest();
 refreshHistory();
-setInterval(() => { refreshLatest(); refreshHistory(); }, 60_000);
+refreshRecords();
+refreshRisk();
+setInterval(() => { refreshLatest(); refreshHistory(); refreshRecords(); refreshRisk(); }, 60_000);
 </script>
 </body>
 </html>

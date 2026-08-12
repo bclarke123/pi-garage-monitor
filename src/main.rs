@@ -7,6 +7,7 @@
 
 mod db;
 mod sensor;
+mod weather;
 mod web;
 
 use std::net::SocketAddr;
@@ -34,6 +35,14 @@ struct Args {
     /// Use a simulated sensor instead of the BME280 (for development).
     #[arg(long)]
     mock: bool,
+
+    /// Latitude for outdoor weather via Open-Meteo (enables weather polling).
+    #[arg(long, requires = "longitude", allow_hyphen_values = true)]
+    latitude: Option<f64>,
+
+    /// Longitude for outdoor weather via Open-Meteo.
+    #[arg(long, requires = "latitude", allow_hyphen_values = true)]
+    longitude: Option<f64>,
 }
 
 /// Returns the current Unix time in seconds.
@@ -65,6 +74,15 @@ async fn main() -> Result<()> {
     let sampler_db = db.clone();
     let interval = Duration::from_secs(args.interval_secs.max(1));
     std::thread::spawn(move || sensor::run_sampler(sensor, sampler_db, interval));
+
+    if let (Some(latitude), Some(longitude)) = (args.latitude, args.longitude) {
+        let coordinates = weather::Coordinates {
+            latitude,
+            longitude,
+        };
+        let weather_db = db.clone();
+        std::thread::spawn(move || weather::run_poller(coordinates, weather_db));
+    }
 
     web::serve(db, args.listen).await
 }

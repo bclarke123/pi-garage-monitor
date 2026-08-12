@@ -50,8 +50,8 @@ Check which one you need with `uname -m` on the Pi: `armv7l` → armv7,
 
 ```sh
 # from this repo on your workstation (binary downloaded from CI into ~/Downloads)
-scp ~/Downloads/pi-garage-monitor-armv7-unknown-linux-musleabihf pi@garage-pi.local:/tmp/pi-garage-monitor
-scp deploy/garage-monitor.service pi@garage-pi.local:/tmp/
+scp ~/Downloads/pi-garage-monitor-aarch64-unknown-linux-musl jamin@raspberrypi.local:/tmp/pi-garage-monitor
+scp deploy/garage-monitor.service jamin@raspberrypi.local:/tmp/
 
 # on the Pi
 sudo install -m 755 /tmp/pi-garage-monitor /usr/local/bin/pi-garage-monitor
@@ -63,6 +63,28 @@ journalctl -u garage-monitor -f   # watch it take its first readings
 
 Then open <http://garage-pi.local:8080> from anything on your network.
 The dashboard shows current values plus charts over 24h/48h/7d/30d.
+
+## Outdoor weather &amp; condensation warnings (optional)
+
+Pass your location to enable outdoor weather via the free, keyless
+[Open-Meteo](https://open-meteo.com/) API (polled every 15 minutes):
+
+```sh
+pi-garage-monitor ... --latitude 43.65 --longitude -79.38
+```
+
+Add the flags to `ExecStart` in the systemd unit for a permanent setup.
+The dashboard then shows outdoor temperature/dew point and a warning
+banner when condensation threatens electronics in the space:
+
+- **Critical** — indoor air within 1 °C of its dew point: condensation is
+  likely forming on surfaces right now.
+- **Caution** — indoor air within 3 °C of its dew point, or the outdoor
+  dew point is above the indoor temperature (incoming air will condense
+  on cold contents — keep the space closed up).
+
+Without the flags, the daemon never touches the network and the dashboard
+still shows the indoor dew point derived from the BME280 itself.
 
 ## Local development (no Pi needed)
 
@@ -78,6 +100,10 @@ open http://localhost:8080
 
 - `GET /api/latest` — most recent reading
 - `GET /api/readings?hours=24` — history, bucket-averaged to ≤ ~1000 points
+- `GET /api/records` — all-time extremes (high/low temperature and humidity, each with its timestamp)
+- `GET /api/daily?days=30` — per-local-calendar-day temperature min/max
+- `GET /api/conditions` — latest indoor + outdoor state plus the condensation assessment (`status.level` is `ok`/`warning`/`critical`)
+- `GET /api/risk?days=30` — retroactive per-day condensation summary: minutes saturated / near saturation, humidity peak, indoor low, outdoor dew-point max, and the day's worst severity level
 
 Readings are `{ ts, temperature_c, humidity_pct, pressure_hpa }` with `ts`
 in Unix seconds.

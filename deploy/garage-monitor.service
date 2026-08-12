@@ -7,10 +7,14 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/pi-garage-monitor \
     --db /var/lib/garage-monitor/garage.db \
     --listen 0.0.0.0:8080 \
-    --interval-secs 60
+    --interval-secs 60 \
+    --latitude 43.20 \
+    --longitude -79.56
 # Creates /var/lib/garage-monitor owned by the service user.
 StateDirectory=garage-monitor
-User=pi
+# Match the account created when the Pi was imaged (modern Raspberry Pi
+# OS has no default "pi" user).
+User=jamin
 SupplementaryGroups=i2c
 Restart=on-failure
 RestartSec=10

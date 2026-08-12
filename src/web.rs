@@ -13,10 +13,11 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::db::{Db, Reading};
+use crate::db::{DailyExtremes, DayRisk, Db, OutdoorReading, Reading, Records};
 use crate::unix_ts_now;
+use crate::weather::{self, Assessment};
 
 const INDEX_HTML: &str = include_str!("index.html");
 
@@ -35,6 +36,10 @@ pub async fn serve(db: Db, listen: SocketAddr) -> Result<()> {
         .route("/", get(index))
         .route("/api/latest", get(latest))
         .route("/api/readings", get(readings))
+        .route("/api/records", get(records))
+        .route("/api/daily", get(daily))
+        .route("/api/conditions", get(conditions))
+        .route("/api/risk", get(risk))
         .with_state(db);
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -74,6 +79,64 @@ async fn readings(
     let bucket_secs = (window_secs / MAX_POINTS).max(1);
     let rows = tokio::task::spawn_blocking(move || db.since(from_ts, bucket_secs)).await??;
     Ok(Json(rows))
+}
+
+async fn records(State(db): State<Db>) -> Result<Json<Option<Records>>, AppError> {
+    let records = tokio::task::spawn_blocking(move || db.records()).await??;
+    Ok(Json(records))
+}
+
+#[derive(Debug, Deserialize)]
+struct DailyParams {
+    days: Option<u32>,
+}
+
+async fn daily(
+    State(db): State<Db>,
+    Query(params): Query<DailyParams>,
+) -> Result<Json<Vec<DailyExtremes>>, AppError> {
+    let days = params.days.unwrap_or(30).clamp(1, 366);
+    let from_ts = unix_ts_now() - i64::from(days) * 86_400;
+    let rows = tokio::task::spawn_blocking(move || db.daily_extremes(from_ts)).await??;
+    Ok(Json(rows))
+}
+
+async fn risk(
+    State(db): State<Db>,
+    Query(params): Query<DailyParams>,
+) -> Result<Json<Vec<DayRisk>>, AppError> {
+    let days = params.days.unwrap_or(30).clamp(1, 366);
+    let from_ts = unix_ts_now() - i64::from(days) * 86_400;
+    let rows = tokio::task::spawn_blocking(move || db.daily_risk(from_ts)).await??;
+    Ok(Json(rows))
+}
+
+/// Outdoor observations older than this are treated as missing — a stale
+/// value from a dead API poller must not silence (or raise) warnings.
+const OUTDOOR_STALE_SECS: i64 = 2 * 3600;
+
+/// Combined current state for the dashboard header and warning banner.
+#[derive(Debug, Serialize)]
+struct Conditions {
+    indoor: Option<Reading>,
+    outdoor: Option<OutdoorReading>,
+    status: Option<Assessment>,
+}
+
+async fn conditions(State(db): State<Db>) -> Result<Json<Conditions>, AppError> {
+    let (indoor, outdoor) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        Ok((db.latest()?, db.latest_outdoor()?))
+    })
+    .await??;
+    let outdoor = outdoor.filter(|o| unix_ts_now() - o.ts <= OUTDOOR_STALE_SECS);
+    let status = indoor
+        .as_ref()
+        .map(|reading| weather::assess(reading, outdoor.as_ref()));
+    Ok(Json(Conditions {
+        indoor,
+        outdoor,
+        status,
+    }))
 }
 
 /// Maps any internal error to a plain 500 response.

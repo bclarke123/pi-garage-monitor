@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS readings (
     pressure_hpa  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS readings_ts ON readings (ts);
+CREATE TABLE IF NOT EXISTS outdoor (
+    id            INTEGER PRIMARY KEY,
+    ts            INTEGER NOT NULL,
+    temperature_c REAL NOT NULL,
+    humidity_pct  REAL NOT NULL,
+    dew_point_c   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS outdoor_ts ON outdoor (ts);
 ";
 
 impl Db {
@@ -123,10 +131,274 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Returns all-time record extremes, or `None` while the database is empty.
+    ///
+    /// # Errors
+    /// Returns an error if a query fails.
+    pub fn records(&self) -> Result<Option<Records>> {
+        let conn = self.lock();
+        let extreme = |column: &str, order: &str| -> Result<Option<Extreme>> {
+            let sql =
+                format!("SELECT ts, {column} FROM readings ORDER BY {column} {order}, ts LIMIT 1");
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = stmt.query_map([], |row| {
+                Ok(Extreme {
+                    ts: row.get(0)?,
+                    value: row.get(1)?,
+                })
+            })?;
+            rows.next().transpose().map_err(Into::into)
+        };
+        let Some(highest_temperature_c) = extreme("temperature_c", "DESC")? else {
+            return Ok(None);
+        };
+        Ok(Some(Records {
+            highest_temperature_c,
+            lowest_temperature_c: extreme("temperature_c", "ASC")?.expect("table is non-empty"),
+            highest_humidity_pct: extreme("humidity_pct", "DESC")?.expect("table is non-empty"),
+            lowest_humidity_pct: extreme("humidity_pct", "ASC")?.expect("table is non-empty"),
+        }))
+    }
+
+    /// Returns per-calendar-day temperature extremes at or after `from_ts`.
+    ///
+    /// Days are boundaries in the server's local timezone, formatted
+    /// `YYYY-MM-DD`.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn daily_extremes(&self, from_ts: i64) -> Result<Vec<DailyExtremes>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT date(ts, 'unixepoch', 'localtime') AS day,
+                    MIN(temperature_c), MAX(temperature_c)
+             FROM readings WHERE ts >= ?1
+             GROUP BY day ORDER BY day",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![from_ts], |row| {
+            Ok(DailyExtremes {
+                date: row.get(0)?,
+                min_c: row.get(1)?,
+                max_c: row.get(2)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Appends one outdoor weather observation.
+    ///
+    /// # Errors
+    /// Returns an error if the insert fails.
+    pub fn insert_outdoor(&self, outdoor: &OutdoorReading) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO outdoor (ts, temperature_c, humidity_pct, dew_point_c)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                outdoor.ts,
+                outdoor.temperature_c,
+                outdoor.humidity_pct,
+                outdoor.dew_point_c
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns the most recent outdoor observation, if any exist.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn latest_outdoor(&self) -> Result<Option<OutdoorReading>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT ts, temperature_c, humidity_pct, dew_point_c
+             FROM outdoor ORDER BY ts DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            Ok(OutdoorReading {
+                ts: row.get(0)?,
+                temperature_c: row.get(1)?,
+                humidity_pct: row.get(2)?,
+                dew_point_c: row.get(3)?,
+            })
+        })?;
+        rows.next().transpose().map_err(Into::into)
+    }
+
+    /// Summarizes condensation risk per local calendar day at or after `from_ts`.
+    ///
+    /// Streams the raw readings and, for each day, tallies how long indoor
+    /// air spent saturated (dew-point spread < 1 °C) or near saturation
+    /// (< 3 °C), plus the day's worst spread, humidity peak, temperature low,
+    /// and the day's highest outdoor dew point when weather data exists.
+    /// Minutes are counted as distinct sample minutes, so the tallies stay
+    /// honest at any sample interval.
+    ///
+    /// # Errors
+    /// Returns an error if a query fails.
+    pub fn daily_risk(&self, from_ts: i64) -> Result<Vec<DayRisk>> {
+        // Spread bands mirror the live assessment in `weather::assess`.
+        const SPREAD_SATURATED_C: f64 = 1.0;
+        const SPREAD_NEAR_C: f64 = 3.0;
+
+        struct Acc {
+            saturated_minutes: u32,
+            near_minutes: u32,
+            last_saturated_minute: i64,
+            last_near_minute: i64,
+            min_spread_c: f64,
+            max_humidity_pct: f64,
+            min_temperature_c: f64,
+        }
+
+        let conn = self.lock();
+        let mut days: std::collections::BTreeMap<String, Acc> = std::collections::BTreeMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT date(ts, 'unixepoch', 'localtime'), ts, temperature_c, humidity_pct
+             FROM readings WHERE ts >= ?1 ORDER BY ts",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![from_ts], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (day, ts, temperature_c, humidity_pct) = row?;
+            let spread = temperature_c - crate::weather::dew_point_c(temperature_c, humidity_pct);
+            let minute = ts.div_euclid(60);
+            let acc = days.entry(day).or_insert(Acc {
+                saturated_minutes: 0,
+                near_minutes: 0,
+                last_saturated_minute: i64::MIN,
+                last_near_minute: i64::MIN,
+                min_spread_c: f64::INFINITY,
+                max_humidity_pct: f64::NEG_INFINITY,
+                min_temperature_c: f64::INFINITY,
+            });
+            if spread < SPREAD_SATURATED_C && minute != acc.last_saturated_minute {
+                acc.saturated_minutes += 1;
+                acc.last_saturated_minute = minute;
+            }
+            if spread < SPREAD_NEAR_C && minute != acc.last_near_minute {
+                acc.near_minutes += 1;
+                acc.last_near_minute = minute;
+            }
+            acc.min_spread_c = acc.min_spread_c.min(spread);
+            acc.max_humidity_pct = acc.max_humidity_pct.max(humidity_pct);
+            acc.min_temperature_c = acc.min_temperature_c.min(temperature_c);
+        }
+
+        let mut outdoor_dew: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT date(ts, 'unixepoch', 'localtime') AS day, MAX(dew_point_c)
+             FROM outdoor WHERE ts >= ?1 GROUP BY day",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![from_ts], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        for row in rows {
+            let (day, dew) = row?;
+            outdoor_dew.insert(day, dew);
+        }
+
+        Ok(days
+            .into_iter()
+            .map(|(date, acc)| {
+                let max_outdoor_dew_point_c = outdoor_dew.get(&date).copied();
+                DayRisk {
+                    level: crate::weather::assess_day(
+                        acc.saturated_minutes,
+                        acc.near_minutes,
+                        acc.min_temperature_c,
+                        max_outdoor_dew_point_c,
+                    ),
+                    date,
+                    saturated_minutes: acc.saturated_minutes,
+                    near_saturation_minutes: acc.near_minutes,
+                    min_spread_c: acc.min_spread_c,
+                    max_humidity_pct: acc.max_humidity_pct,
+                    min_temperature_c: acc.min_temperature_c,
+                    max_outdoor_dew_point_c,
+                }
+            })
+            .collect())
+    }
+
     fn lock(&self) -> MutexGuard<'_, Connection> {
         // A poisoned mutex means another thread already panicked; stop too.
         self.conn.lock().expect("database mutex poisoned")
     }
+}
+
+/// One local-calendar-day's retroactive condensation-risk summary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DayRisk {
+    /// Local date as `YYYY-MM-DD`.
+    pub date: String,
+    /// Worst condensation severity reached that day.
+    pub level: crate::weather::Level,
+    /// Distinct sample minutes with dew-point spread below 1 °C.
+    pub saturated_minutes: u32,
+    /// Distinct sample minutes with dew-point spread below 3 °C.
+    pub near_saturation_minutes: u32,
+    /// Smallest dew-point spread of the day, in °C.
+    pub min_spread_c: f64,
+    /// Highest indoor relative humidity of the day, in percent.
+    pub max_humidity_pct: f64,
+    /// Coldest indoor reading of the day, in °C (proxy for surface temperature).
+    pub min_temperature_c: f64,
+    /// Highest outdoor dew point of the day, in °C, if weather data exists.
+    pub max_outdoor_dew_point_c: Option<f64>,
+}
+
+/// One outdoor weather observation from the weather API.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct OutdoorReading {
+    /// Unix timestamp in seconds when the observation was fetched.
+    pub ts: i64,
+    /// Outdoor temperature in degrees Celsius.
+    pub temperature_c: f64,
+    /// Outdoor relative humidity in percent (0–100).
+    pub humidity_pct: f64,
+    /// Outdoor dew point in degrees Celsius.
+    pub dew_point_c: f64,
+}
+
+/// A record value and when it was observed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Extreme {
+    /// Unix timestamp in seconds of the observation.
+    pub ts: i64,
+    /// The observed value.
+    pub value: f64,
+}
+
+/// All-time record extremes across the whole database.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Records {
+    /// Hottest reading ever taken.
+    pub highest_temperature_c: Extreme,
+    /// Coldest reading ever taken.
+    pub lowest_temperature_c: Extreme,
+    /// Most humid reading ever taken.
+    pub highest_humidity_pct: Extreme,
+    /// Driest reading ever taken.
+    pub lowest_humidity_pct: Extreme,
+}
+
+/// One local-calendar-day's temperature extremes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DailyExtremes {
+    /// Local date as `YYYY-MM-DD`.
+    pub date: String,
+    /// Coldest reading of the day, in degrees Celsius.
+    pub min_c: f64,
+    /// Hottest reading of the day, in degrees Celsius.
+    pub max_c: f64,
 }
 
 fn row_to_reading(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reading> {
@@ -165,6 +437,79 @@ mod tests {
         let latest = db.latest().unwrap().unwrap();
         assert_eq!(latest.ts, 200);
         assert!((latest.temperature_c - 21.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn records_returns_none_on_empty_db() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.records().unwrap(), None);
+    }
+
+    #[test]
+    fn records_tracks_extremes_with_timestamps() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert(&reading(100, 19.0)).unwrap();
+        db.insert(&reading(200, 32.0)).unwrap();
+        db.insert(&reading(300, -22.0)).unwrap();
+        let records = db.records().unwrap().unwrap();
+        assert_eq!(records.highest_temperature_c.ts, 200);
+        assert!((records.highest_temperature_c.value - 32.0).abs() < f64::EPSILON);
+        assert_eq!(records.lowest_temperature_c.ts, 300);
+        assert!((records.lowest_temperature_c.value + 22.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn daily_extremes_groups_by_local_day() {
+        const DAY: i64 = 86_400;
+        let db = Db::open_in_memory().unwrap();
+        // Two readings well inside one local day, far from midnight in any
+        // timezone offset: use noon UTC on consecutive days.
+        db.insert(&reading(DAY / 2, 5.0)).unwrap();
+        db.insert(&reading(DAY / 2 + 60, 15.0)).unwrap();
+        db.insert(&reading(DAY + DAY / 2, 25.0)).unwrap();
+        let days = db.daily_extremes(0).unwrap();
+        assert_eq!(days.len(), 2);
+        assert!((days[0].min_c - 5.0).abs() < f64::EPSILON);
+        assert!((days[0].max_c - 15.0).abs() < f64::EPSILON);
+        assert!((days[1].min_c - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn daily_risk_flags_saturated_and_incoming_air_days() {
+        const DAY: i64 = 86_400;
+        let db = Db::open_in_memory().unwrap();
+        // Day 1 (noon UTC): six minutes of saturated air → critical.
+        for i in 0..6 {
+            db.insert(&Reading {
+                ts: DAY / 2 + i * 60,
+                temperature_c: 12.0,
+                humidity_pct: 99.0,
+                pressure_hpa: 1013.0,
+            })
+            .unwrap();
+        }
+        // Day 2: dry indoors (min temp 10 °C) but outdoor dew point 15 °C → warning.
+        db.insert(&Reading {
+            ts: DAY + DAY / 2,
+            temperature_c: 10.0,
+            humidity_pct: 50.0,
+            pressure_hpa: 1013.0,
+        })
+        .unwrap();
+        db.insert_outdoor(&OutdoorReading {
+            ts: DAY + DAY / 2,
+            temperature_c: 22.0,
+            humidity_pct: 80.0,
+            dew_point_c: 15.0,
+        })
+        .unwrap();
+
+        let days = db.daily_risk(0).unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].level, crate::weather::Level::Critical);
+        assert_eq!(days[0].saturated_minutes, 6);
+        assert_eq!(days[1].level, crate::weather::Level::Warning);
+        assert!((days[1].max_outdoor_dew_point_c.unwrap() - 15.0).abs() < f64::EPSILON);
     }
 
     #[test]
