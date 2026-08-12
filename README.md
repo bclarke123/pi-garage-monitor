@@ -105,6 +105,15 @@ open http://localhost:8080
 - `GET /api/conditions` — latest indoor + outdoor state plus the condensation assessment (`status.level` is `ok`/`warning`/`critical`)
 - `GET /api/risk?days=30` — retroactive per-day condensation summary: minutes saturated / near saturation, humidity peak, indoor low, outdoor dew-point max, and the day's worst severity level
 - `GET /api/delta?hours=24` — indoor vs outdoor temperature joined into shared ≥15-min buckets, with `delta_c` (positive = warmer inside); empty until weather polling is enabled
+- `GET /api/events` / `POST /api/events` (`{"ts": <unix-secs, optional>, "label": "roof replaced"}`) / `DELETE /api/events/{id}` — renovation timeline markers, drawn as dashed vertical lines on the charts; add them from the dashboard's "＋ event" button or via curl
+- `GET /api/conditions` also reports `cpu_temp_c` (the Pi's SoC temperature) as a sensor sanity check
+
+The dashboard can be pinned to a phone home screen (web-app manifest is
+served at `/manifest.webmanifest`); on iOS use Share → Add to Home Screen.
+Charts render sampling gaps (power cuts) as visible breaks in the line,
+the header warns when the last reading is more than 10 minutes old, and
+the "daily temperature swing" chart (7-day average, indoor vs outdoor) is
+the single best measure of how well the insulation is working.
 
 Readings are `{ ts, temperature_c, humidity_pct, pressure_hpa }` with `ts`
 in Unix seconds.

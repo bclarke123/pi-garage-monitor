@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS outdoor (
     dew_point_c   REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS outdoor_ts ON outdoor (ts);
+CREATE TABLE IF NOT EXISTS events (
+    id    INTEGER PRIMARY KEY,
+    ts    INTEGER NOT NULL,
+    label TEXT NOT NULL
+);
 ";
 
 impl Db {
@@ -163,12 +168,33 @@ impl Db {
     /// Returns per-calendar-day temperature extremes at or after `from_ts`.
     ///
     /// Days are boundaries in the server's local timezone, formatted
-    /// `YYYY-MM-DD`.
+    /// `YYYY-MM-DD`. Outdoor extremes are included for days that have
+    /// weather observations.
     ///
     /// # Errors
-    /// Returns an error if the query fails.
+    /// Returns an error if a query fails.
     pub fn daily_extremes(&self, from_ts: i64) -> Result<Vec<DailyExtremes>> {
         let conn = self.lock();
+
+        let mut outdoor: std::collections::HashMap<String, (f64, f64)> =
+            std::collections::HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT date(ts, 'unixepoch', 'localtime') AS day,
+                    MIN(temperature_c), MAX(temperature_c)
+             FROM outdoor WHERE ts >= ?1 GROUP BY day",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![from_ts], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (day, min, max) = row?;
+            outdoor.insert(day, (min, max));
+        }
+
         let mut stmt = conn.prepare(
             "SELECT date(ts, 'unixepoch', 'localtime') AS day,
                     MIN(temperature_c), MAX(temperature_c)
@@ -180,10 +206,61 @@ impl Db {
                 date: row.get(0)?,
                 min_c: row.get(1)?,
                 max_c: row.get(2)?,
+                outdoor_min_c: None,
+                outdoor_max_c: None,
+            })
+        })?;
+        rows.map(|row| {
+            let mut day = row?;
+            if let Some(&(min, max)) = outdoor.get(&day.date) {
+                day.outdoor_min_c = Some(min);
+                day.outdoor_max_c = Some(max);
+            }
+            Ok(day)
+        })
+        .collect()
+    }
+
+    /// Records a renovation/timeline event, returning its id.
+    ///
+    /// # Errors
+    /// Returns an error if the insert fails.
+    pub fn add_event(&self, ts: i64, label: &str) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO events (ts, label) VALUES (?1, ?2)",
+            rusqlite::params![ts, label],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Returns all recorded events, oldest first.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn events(&self) -> Result<Vec<Event>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT id, ts, label FROM events ORDER BY ts")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Event {
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                label: row.get(2)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    /// Deletes an event by id, returning whether it existed.
+    ///
+    /// # Errors
+    /// Returns an error if the delete fails.
+    pub fn delete_event(&self, id: i64) -> Result<bool> {
+        let deleted = self
+            .lock()
+            .execute("DELETE FROM events WHERE id = ?1", rusqlite::params![id])?;
+        Ok(deleted > 0)
     }
 
     /// Appends one outdoor weather observation.
@@ -446,6 +523,21 @@ pub struct DailyExtremes {
     pub min_c: f64,
     /// Hottest reading of the day, in degrees Celsius.
     pub max_c: f64,
+    /// Coldest outdoor observation of the day, if weather data exists.
+    pub outdoor_min_c: Option<f64>,
+    /// Hottest outdoor observation of the day, if weather data exists.
+    pub outdoor_max_c: Option<f64>,
+}
+
+/// A labeled point on the renovation timeline (e.g. "roof replaced").
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Event {
+    /// Database id, used to delete the event.
+    pub id: i64,
+    /// Unix timestamp in seconds the event applies to.
+    pub ts: i64,
+    /// Short human-readable description.
+    pub label: String,
 }
 
 fn row_to_reading(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reading> {
@@ -519,6 +611,37 @@ mod tests {
         assert!((days[0].min_c - 5.0).abs() < f64::EPSILON);
         assert!((days[0].max_c - 15.0).abs() < f64::EPSILON);
         assert!((days[1].min_c - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn events_roundtrip_and_delete() {
+        let db = Db::open_in_memory().unwrap();
+        let id = db.add_event(1000, "roof replaced").unwrap();
+        let events = db.events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].label, "roof replaced");
+        assert!(db.delete_event(id).unwrap());
+        assert!(!db.delete_event(id).unwrap());
+        assert!(db.events().unwrap().is_empty());
+    }
+
+    #[test]
+    fn daily_extremes_includes_outdoor_when_present() {
+        const DAY: i64 = 86_400;
+        let db = Db::open_in_memory().unwrap();
+        db.insert(&reading(DAY / 2, 15.0)).unwrap();
+        db.insert_outdoor(&OutdoorReading {
+            ts: DAY / 2,
+            temperature_c: 25.0,
+            humidity_pct: 50.0,
+            dew_point_c: 10.0,
+        })
+        .unwrap();
+        db.insert(&reading(DAY + DAY / 2, 16.0)).unwrap(); // no outdoor this day
+        let days = db.daily_extremes(0).unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].outdoor_max_c, Some(25.0));
+        assert_eq!(days[1].outdoor_max_c, None);
     }
 
     #[test]

@@ -3,6 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0d0d0d">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
 <title>Garage Monitor</title>
 <style>
   .viz-root {
@@ -19,6 +26,7 @@
     --series-hum:     #eb6834;  /* categorical slot 2: orange */
     --series-pres:    #1baf7a;  /* categorical slot 3: aqua   */
     --series-delta:   #eda100;  /* categorical slot 4: yellow */
+    --series-swing:   #e87ba4;  /* categorical slot 5: magenta */
   }
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) .viz-root {
@@ -35,6 +43,7 @@
       --series-hum:     #d95926;
       --series-pres:    #199e70;
       --series-delta:   #c98500;
+      --series-swing:   #d55181;
     }
   }
   :root[data-theme="dark"] .viz-root {
@@ -51,6 +60,7 @@
     --series-hum:     #d95926;
     --series-pres:    #199e70;
     --series-delta:   #c98500;
+    --series-swing:   #d55181;
   }
 
   * { box-sizing: border-box; }
@@ -76,9 +86,30 @@
   .tile .swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
   .tile .value { font-size: 32px; font-weight: 600; margin-top: 4px; }
   .tile .value small { font-size: 16px; font-weight: 500; color: var(--text-secondary); }
-  .tile .sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .tile .sub {
+    font-size: 12px; color: var(--text-muted); margin-top: 4px;
+    display: grid; grid-template-columns: auto auto; justify-content: start;
+    column-gap: 10px; row-gap: 2px;
+  }
+  .tile .sub .sv { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 
-  .filters { display: flex; gap: 6px; margin: 4px 0 14px; }
+  .filters { display: flex; gap: 6px; margin: 4px 0 14px; align-items: center; }
+  .filters .spacer { flex: 1; }
+  .pi-temp { color: var(--text-muted); font-size: 13px; margin-right: 10px; }
+  .event-form { display: flex; gap: 6px; margin: -6px 0 14px; flex-wrap: wrap; }
+  .event-form[hidden] { display: none; }
+  .event-form input, .event-form button {
+    font: inherit; font-size: 13px;
+    color: var(--text-primary);
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 5px 10px;
+  }
+  .event-form input[type="text"] { flex: 1; min-width: 160px; }
+  .event-form button { cursor: pointer; color: var(--text-secondary); }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); margin: -4px 0 6px; }
+  .legend .swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; margin-right: 5px; }
   .filters button {
     font: inherit; font-size: 13px;
     color: var(--text-secondary);
@@ -141,13 +172,14 @@
   .banner span.msg { color: var(--text-secondary); }
 
   .risk-summary { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
-  .risk-row {
-    display: flex; align-items: baseline; gap: 10px;
+  #risk-rows { display: grid; grid-template-columns: auto auto 1fr; column-gap: 12px; }
+  .risk-row { display: contents; }
+  .risk-row > span {
     border-top: 1px solid var(--grid);
     padding: 7px 0;
     font-size: 13px;
   }
-  .risk-row .badge { font-weight: 700; white-space: nowrap; }
+  .risk-row .badge { font-weight: 700; cursor: help; text-align: center; }
   .risk-row .date { font-weight: 600; white-space: nowrap; }
   .risk-row .detail { color: var(--text-secondary); }
 
@@ -164,7 +196,7 @@
 <main>
   <header>
     <h1>Garage Monitor</h1>
-    <span id="updated">loading…</span>
+    <span><span id="pi-temp" class="pi-temp"></span><span id="updated">loading…</span></span>
   </header>
 
   <div class="banner" id="banner" hidden>
@@ -201,6 +233,15 @@
     <button data-hours="48" aria-pressed="false">48h</button>
     <button data-hours="168" aria-pressed="false">7d</button>
     <button data-hours="720" aria-pressed="false">30d</button>
+    <span class="spacer"></span>
+    <button id="add-event">＋ event</button>
+  </div>
+
+  <div class="event-form" id="event-form" hidden>
+    <input type="date" id="event-date">
+    <input type="text" id="event-label" maxlength="100" placeholder="e.g. roof replaced">
+    <button id="event-save">Save</button>
+    <button id="event-cancel">Cancel</button>
   </div>
 
   <div class="card" id="records-card" hidden>
@@ -212,6 +253,7 @@
   <div class="card" id="chart-hum"><h2>Relative humidity (%)</h2></div>
   <div class="card" id="chart-pres"><h2>Pressure (hPa)</h2></div>
   <div class="card" id="chart-delta"><h2>Indoor − outdoor temperature (Δ°C)</h2></div>
+  <div class="card" id="chart-swing"><h2>Daily temperature swing, 7-day average (°C)</h2></div>
   <div class="card" id="chart-daily"><h2>Daily highs &amp; lows (°C, last 30 days)</h2></div>
 
   <div class="card" id="risk-card" hidden>
@@ -227,6 +269,9 @@
 let hours = 24;
 let data = [];
 let deltaData = [];
+let swingData = [];
+let timelineEvents = [];
+let hasOutdoor = false;
 
 const CHARTS = [
   { card: "chart-temp", field: "temperature_c", color: "--series-temp", unit: "°C",  decimals: 1 },
@@ -236,10 +281,22 @@ const CHARTS = [
     card: "chart-delta", field: "delta_c", color: "--series-delta", unit: "°C", decimals: 1,
     rows: () => deltaData,
     zeroLine: true,
-    emptyText: "Needs outdoor weather data — enable it with --latitude/--longitude.",
+    emptyText: () => hasOutdoor
+      ? "Collecting outdoor readings — the first delta points appear within ~30 minutes."
+      : "Needs outdoor weather data — enable it with --latitude/--longitude.",
     tooltipHtml: r =>
       `<span class="v">Δ ${fmt(r.delta_c, 1)} °C</span><br>` +
       `<span class="t">in ${fmt(r.indoor_c, 1)} °C · out ${fmt(r.outdoor_c, 1)} °C</span>`,
+  },
+  {
+    card: "chart-swing", decimals: 1, unit: "°C",
+    rows: () => swingData,
+    xDates: true,
+    series: [
+      { field: "indoor_c", color: "--series-temp", label: "indoor" },
+      { field: "outdoor_c", color: "--series-swing", label: "outdoor" },
+    ],
+    emptyText: "Needs a couple of days of data — the swing trend appears after day two.",
   },
 ];
 
@@ -283,27 +340,39 @@ function xLabel(ts) {
 function drawChart(spec) {
   const card = document.getElementById(spec.card);
   const rows = spec.rows ? spec.rows() : data;
-  card.querySelectorAll("svg, .empty, .tooltip").forEach(n => n.remove());
+  const series = spec.series || [{ field: spec.field, color: spec.color }];
+  card.querySelectorAll("svg, .empty, .tooltip, .legend").forEach(n => n.remove());
 
   if (rows.length < 2) {
     const p = document.createElement("div");
     p.className = "empty";
-    p.textContent = spec.emptyText || "Not enough data yet — check back after a few readings.";
+    const emptyText = typeof spec.emptyText === "function" ? spec.emptyText() : spec.emptyText;
+    p.textContent = emptyText || "Not enough data yet — check back after a few readings.";
     card.appendChild(p);
     return;
   }
 
   const css = getComputedStyle(card);
-  const color = css.getPropertyValue(spec.color).trim();
-  const gridColor = css.getPropertyValue("--grid").trim();
-  const axisColor = css.getPropertyValue("--axis").trim();
+  const colorOf = v => css.getPropertyValue(v).trim();
+  const gridColor = colorOf("--grid");
+  const axisColor = colorOf("--axis");
+  const mutedColor = colorOf("--text-muted");
+
+  if (series.length > 1) {
+    const legend = document.createElement("div");
+    legend.className = "legend";
+    legend.innerHTML = series.map(sr =>
+      `<span><span class="swatch" style="background:${colorOf(sr.color)}"></span>${sr.label}</span>`
+    ).join("");
+    card.querySelector("h2").after(legend);
+  }
 
   const W = card.clientWidth - 32, H = 180;
   const M = { top: 8, right: 12, bottom: 22, left: 44 };
   const iw = W - M.left - M.right, ih = H - M.top - M.bottom;
 
   const xs = rows.map(r => r.ts);
-  const vs = rows.map(r => r[spec.field]);
+  const vs = series.flatMap(sr => rows.map(r => r[sr.field])).filter(Number.isFinite);
   const xMin = xs[0], xMax = xs[xs.length - 1];
   let vMin = Math.min(...vs), vMax = Math.max(...vs);
   const pad = (vMax - vMin) * 0.12 || 1;
@@ -345,15 +414,44 @@ function drawChart(spec) {
       x: X(ts), y: M.top + ih + 15,
       "text-anchor": i === 0 ? "start" : i === nx ? "end" : "middle",
     });
-    label.textContent = xLabel(ts);
+    label.textContent = spec.xDates
+      ? new Date(ts * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+      : xLabel(ts);
   }
 
-  const path = rows.map((r, i) => `${i ? "L" : "M"}${X(r.ts).toFixed(1)},${Y(r[spec.field]).toFixed(1)}`).join("");
-  el("path", { d: path, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" });
+  // Renovation timeline markers.
+  for (const ev of timelineEvents) {
+    if (ev.ts < xMin || ev.ts > xMax) continue;
+    const px = X(ev.ts);
+    el("line", { x1: px, x2: px, y1: M.top, y2: M.top + ih, stroke: mutedColor, "stroke-width": 1, "stroke-dasharray": "3,3" });
+    const nearRight = px > M.left + iw * 0.75;
+    const label = el("text", { x: nearRight ? px - 4 : px + 4, y: M.top + 9, "text-anchor": nearRight ? "end" : "start" });
+    label.textContent = ev.label;
+  }
 
-  // Hover layer: crosshair + marker + tooltip across the whole plot area.
+  // A break in sampling (power cut, daemon down) must show as a gap in the
+  // line, not a fabricated straight segment across the outage.
+  const dts = [];
+  for (let i = 1; i < xs.length; i++) dts.push(xs[i] - xs[i - 1]);
+  const sorted = dts.slice().sort((a, b) => a - b);
+  const maxGap = (sorted[Math.floor(sorted.length / 2)] || 1) * 3.5;
+
+  for (const sr of series) {
+    let path = "", pen = "M";
+    for (let i = 0; i < rows.length; i++) {
+      const v = rows[i][sr.field];
+      if (!Number.isFinite(v)) { pen = "M"; continue; }
+      if (i > 0 && xs[i] - xs[i - 1] > maxGap) pen = "M";
+      path += `${pen}${X(rows[i].ts).toFixed(1)},${Y(v).toFixed(1)}`;
+      pen = "L";
+    }
+    el("path", { d: path, fill: "none", stroke: colorOf(sr.color), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" });
+  }
+
+  // Hover layer: crosshair + markers + tooltip across the whole plot area.
   const crosshair = el("line", { y1: M.top, y2: M.top + ih, stroke: axisColor, "stroke-width": 1, visibility: "hidden" });
-  const marker = el("circle", { r: 4.5, fill: color, stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden" });
+  const markers = series.map(sr =>
+    el("circle", { r: 4.5, fill: colorOf(sr.color), stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden" }));
   const tooltip = document.createElement("div");
   tooltip.className = "tooltip";
   card.appendChild(tooltip);
@@ -367,25 +465,41 @@ function drawChart(spec) {
       if (Math.abs(rows[i].ts - ts) < Math.abs(rows[best].ts - ts)) best = i;
     }
     const r = rows[best];
-    const px = X(r.ts), py = Y(r[spec.field]);
+    const px = X(r.ts);
     crosshair.setAttribute("x1", px); crosshair.setAttribute("x2", px);
     crosshair.setAttribute("visibility", "visible");
-    marker.setAttribute("cx", px); marker.setAttribute("cy", py);
-    marker.setAttribute("visibility", "visible");
+    let anchorY = M.top + ih / 2;
+    series.forEach((sr, i) => {
+      const v = r[sr.field];
+      if (Number.isFinite(v)) {
+        markers[i].setAttribute("cx", px); markers[i].setAttribute("cy", Y(v));
+        markers[i].setAttribute("visibility", "visible");
+        anchorY = Y(v);
+      } else {
+        markers[i].setAttribute("visibility", "hidden");
+      }
+    });
     const d = new Date(r.ts * 1000);
-    const when = `<span class="t">${d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span><br>`;
-    tooltip.innerHTML = when + (spec.tooltipHtml
+    const when = `<span class="t">${d.toLocaleString(undefined, spec.xDates
+      ? { weekday: "short", month: "short", day: "numeric" }
+      : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span><br>`;
+    const body = spec.tooltipHtml
       ? spec.tooltipHtml(r)
-      : `<span class="v">${fmt(r[spec.field], spec.decimals)} ${spec.unit}</span>`);
+      : series.map(sr => {
+          const v = r[sr.field];
+          const name = sr.label ? `${sr.label} ` : "";
+          return `<span class="v">${name}${Number.isFinite(v) ? fmt(v, spec.decimals) : "–"} ${spec.unit}</span>`;
+        }).join("<br>");
+    tooltip.innerHTML = when + body;
     tooltip.style.display = "block";
     const scale = rect.width / W;
     const left = Math.min(px * scale + 14, rect.width - tooltip.offsetWidth - 4);
     tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${py * scale + 18}px`;
+    tooltip.style.top = `${anchorY * scale + 18}px`;
   });
   overlay.addEventListener("mouseleave", () => {
     crosshair.setAttribute("visibility", "hidden");
-    marker.setAttribute("visibility", "hidden");
+    markers.forEach(m => m.setAttribute("visibility", "hidden"));
     tooltip.style.display = "none";
   });
 
@@ -495,6 +609,26 @@ function drawDaily() {
 
 function drawAll() { CHARTS.forEach(drawChart); drawDaily(); }
 
+// Trailing 7-day average of each day's temperature swing (high − low),
+// indoor and (where weather data exists) outdoor. A shrinking indoor
+// swing against a steady outdoor swing is insulation doing its job.
+function computeSwing(days) {
+  const points = days.map(d => ({
+    ts: localDate(d.date).getTime() / 1000 + 43_200,
+    indoor: d.max_c - d.min_c,
+    outdoor: d.outdoor_max_c === null ? null : d.outdoor_max_c - d.outdoor_min_c,
+  }));
+  return points.map((p, i) => {
+    const window = points.slice(Math.max(0, i - 6), i + 1);
+    const outs = window.map(w => w.outdoor).filter(v => v !== null);
+    return {
+      ts: p.ts,
+      indoor_c: window.reduce((a, w) => a + w.indoor, 0) / window.length,
+      outdoor_c: outs.length > 0 ? outs.reduce((a, b) => a + b, 0) / outs.length : null,
+    };
+  });
+}
+
 const STATUS = {
   ok:       { color: "#0ca30c", icon: "✓", label: "OK" },
   warning:  { color: "#fab219", icon: "▲", label: "Caution" },
@@ -505,8 +639,18 @@ async function refreshLatest() {
   const c = await (await fetch("/api/conditions")).json();
   const updated = document.getElementById("updated");
   const r = c.indoor;
+  document.getElementById("pi-temp").textContent =
+    c.cpu_temp_c === null || c.cpu_temp_c === undefined ? "" : `Pi ${fmt(c.cpu_temp_c, 0)} °C · `;
   if (!r) { updated.textContent = "no readings yet"; return; }
-  updated.textContent = `updated ${timeAgo(r.ts)}`;
+  // A quietly aging timestamp is easy to miss; make staleness loud.
+  const age = Date.now() / 1000 - r.ts;
+  if (age > 600) {
+    updated.textContent = `▲ last reading ${timeAgo(r.ts)} — sensor may be down`;
+    updated.style.color = STATUS.warning.color;
+  } else {
+    updated.textContent = `updated ${timeAgo(r.ts)}`;
+    updated.style.color = "";
+  }
   document.getElementById("tile-temp").innerHTML = `${fmt(r.temperature_c, 1)} <small>°C</small>`;
   document.getElementById("tile-hum").innerHTML = `${fmt(r.humidity_pct, 0)} <small>%</small>`;
   document.getElementById("tile-pres").innerHTML = `${fmt(r.pressure_hpa, 1)} <small>hPa</small>`;
@@ -525,23 +669,27 @@ async function refreshLatest() {
   }
 
   const outCard = document.getElementById("tile-out-card");
+  hasOutdoor = Boolean(c.outdoor);
   if (c.outdoor) {
     outCard.hidden = false;
     document.getElementById("tile-out").innerHTML =
       `${fmt(c.outdoor.temperature_c, 1)} <small>°C</small>`;
-    document.getElementById("tile-out-sub").textContent =
-      `dew point ${fmt(c.outdoor.dew_point_c, 1)} °C · ${fmt(c.outdoor.humidity_pct, 0)}% RH`;
+    document.getElementById("tile-out-sub").innerHTML =
+      `<span>Dew point</span><span class="sv">${fmt(c.outdoor.dew_point_c, 1)} °C</span>` +
+      `<span>Rel. humidity</span><span class="sv">${fmt(c.outdoor.humidity_pct, 0)}%</span>`;
   } else {
     outCard.hidden = true;
   }
 }
 
 async function refreshHistory() {
-  [data, deltaData, dailyData] = await Promise.all([
+  [data, deltaData, dailyData, timelineEvents] = await Promise.all([
     (await fetch(`/api/readings?hours=${hours}`)).json(),
     (await fetch(`/api/delta?hours=${hours}`)).json(),
     (await fetch("/api/daily?days=30")).json(),
+    (await fetch("/api/events")).json(),
   ]);
+  swingData = computeSwing(dailyData);
   drawAll();
 }
 
@@ -609,12 +757,38 @@ async function refreshRisk() {
       const date = localDate(d.date).toLocaleDateString(undefined,
         { weekday: "short", month: "short", day: "numeric" });
       return `<div class="risk-row">` +
-        `<span class="badge" style="color:${s.color}">${s.icon} ${s.label}</span>` +
+        `<span class="badge" style="color:${s.color}" title="${s.label}" role="img" aria-label="${s.label}">${s.icon}</span>` +
         `<span class="date">${date}</span>` +
         `<span class="detail">${details.join(" · ")}</span></div>`;
     })
     .join("");
 }
+
+const eventForm = document.getElementById("event-form");
+document.getElementById("add-event").addEventListener("click", () => {
+  eventForm.hidden = !eventForm.hidden;
+  if (!eventForm.hidden) {
+    const now = new Date();
+    document.getElementById("event-date").value =
+      `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    document.getElementById("event-label").focus();
+  }
+});
+document.getElementById("event-cancel").addEventListener("click", () => { eventForm.hidden = true; });
+document.getElementById("event-save").addEventListener("click", async () => {
+  const label = document.getElementById("event-label").value.trim();
+  const date = document.getElementById("event-date").value;
+  if (!label || !date) return;
+  await fetch("/api/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // Noon local time keeps the marker inside the intended day.
+    body: JSON.stringify({ ts: localDate(date).getTime() / 1000 + 43_200, label }),
+  });
+  document.getElementById("event-label").value = "";
+  eventForm.hidden = true;
+  refreshHistory();
+});
 
 refreshLatest();
 refreshHistory();

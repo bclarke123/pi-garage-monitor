@@ -8,14 +8,14 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, State};
+use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{DailyExtremes, DayRisk, Db, DeltaPoint, OutdoorReading, Reading, Records};
+use crate::db::{DailyExtremes, DayRisk, Db, DeltaPoint, Event, OutdoorReading, Reading, Records};
 use crate::unix_ts_now;
 use crate::weather::{self, Assessment};
 
@@ -41,6 +41,10 @@ pub async fn serve(db: Db, listen: SocketAddr) -> Result<()> {
         .route("/api/conditions", get(conditions))
         .route("/api/risk", get(risk))
         .route("/api/delta", get(delta))
+        .route("/api/events", get(list_events).post(create_event))
+        .route("/api/events/{id}", axum::routing::delete(delete_event))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/icon.svg", get(icon))
         .with_state(db);
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -119,6 +123,46 @@ async fn delta(
     Ok(Json(rows))
 }
 
+async fn list_events(State(db): State<Db>) -> Result<Json<Vec<Event>>, AppError> {
+    let events = tokio::task::spawn_blocking(move || db.events()).await??;
+    Ok(Json(events))
+}
+
+#[derive(Debug, Deserialize)]
+struct NewEvent {
+    /// Unix seconds the event applies to; defaults to now.
+    ts: Option<i64>,
+    label: String,
+}
+
+async fn create_event(
+    State(db): State<Db>,
+    Json(new_event): Json<NewEvent>,
+) -> Result<(StatusCode, Json<Event>), AppError> {
+    let label = new_event.label.trim().to_owned();
+    if label.is_empty() || label.len() > 100 {
+        return Err(AppError(anyhow::anyhow!(
+            "event label must be 1-100 characters"
+        )));
+    }
+    let ts = new_event.ts.unwrap_or_else(unix_ts_now);
+    let event = tokio::task::spawn_blocking(move || -> anyhow::Result<Event> {
+        let id = db.add_event(ts, &label)?;
+        Ok(Event { id, ts, label })
+    })
+    .await??;
+    Ok((StatusCode::CREATED, Json(event)))
+}
+
+async fn delete_event(State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, AppError> {
+    let existed = tokio::task::spawn_blocking(move || db.delete_event(id)).await??;
+    Ok(if existed {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    })
+}
+
 async fn risk(
     State(db): State<Db>,
     Query(params): Query<DailyParams>,
@@ -139,6 +183,23 @@ struct Conditions {
     indoor: Option<Reading>,
     outdoor: Option<OutdoorReading>,
     status: Option<Assessment>,
+    cpu_temp_c: Option<f64>,
+}
+
+/// Reads the Pi SoC temperature from sysfs (Linux only).
+///
+/// A sanity cross-check for the BME280 and an early warning if the Pi
+/// itself is overheating in a summer garage.
+#[cfg(target_os = "linux")]
+fn cpu_temp_c() -> Option<f64> {
+    let raw = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
+    // The file holds millidegrees Celsius, e.g. "54608".
+    raw.trim().parse::<f64>().ok().map(|milli| milli / 1000.0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cpu_temp_c() -> Option<f64> {
+    None
 }
 
 async fn conditions(State(db): State<Db>) -> Result<Json<Conditions>, AppError> {
@@ -154,7 +215,35 @@ async fn conditions(State(db): State<Db>) -> Result<Json<Conditions>, AppError> 
         indoor,
         outdoor,
         status,
+        cpu_temp_c: cpu_temp_c(),
     }))
+}
+
+/// Web-app manifest so the dashboard can be pinned to a phone home screen.
+const MANIFEST: &str = r##"{
+  "name": "Garage Monitor",
+  "short_name": "Garage",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d0d0d",
+  "theme_color": "#0d0d0d",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}"##;
+
+async fn manifest() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/manifest+json")],
+        MANIFEST,
+    )
+}
+
+const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+<rect width="100" height="100" rx="20" fill="#1a1a19"/>
+<text x="50" y="50" font-size="58" text-anchor="middle" dominant-baseline="central">🌡️</text>
+</svg>"##;
+
+async fn icon() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/svg+xml")], ICON_SVG)
 }
 
 /// Maps any internal error to a plain 500 response.
