@@ -109,7 +109,8 @@
 
   .filters { display: flex; gap: 6px; margin: 4px 0 14px; align-items: center; }
   .filters .spacer { flex: 1; }
-  .pi-temp { color: var(--text-muted); font-size: 13px; margin-right: 10px; }
+  .pi-temp { color: var(--text-muted); font-size: 13px; }
+  .pi-temp:not(:empty)::after { content: "·"; margin: 0 8px; }
   .event-form { display: flex; gap: 6px; margin: -6px 0 14px; flex-wrap: wrap; }
   .event-form input, .event-form button {
     font: inherit; font-size: 13px;
@@ -660,7 +661,7 @@ async function refreshLatest() {
   const updated = document.getElementById("updated");
   const r = c.indoor;
   document.getElementById("pi-temp").textContent =
-    c.cpu_temp_c === null || c.cpu_temp_c === undefined ? "" : `Pi ${fmt(c.cpu_temp_c, 0)} °C · `;
+    c.cpu_temp_c === null || c.cpu_temp_c === undefined ? "" : `Pi ${fmt(c.cpu_temp_c, 0)} °C`;
   const setTile = (key, indoorText, outdoorText) => {
     document.getElementById(`tile-${key}`).textContent = indoorText;
     const row = document.getElementById(`tile-${key}-sub`);
