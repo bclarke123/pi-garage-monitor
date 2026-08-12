@@ -186,7 +186,7 @@ struct Conditions {
     cpu_temp_c: Option<f64>,
 }
 
-/// Reads the Pi SoC temperature from sysfs (Linux only).
+/// Reads the Pi `SoC` temperature from sysfs (Linux only).
 ///
 /// A sanity cross-check for the BME280 and an early warning if the Pi
 /// itself is overheating in a summer garage.
