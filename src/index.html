@@ -71,6 +71,17 @@
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   }
   main { max-width: 880px; margin: 0 auto; padding: 20px 16px 40px; }
+  /* Two-column layout once there's room to see everything at once. */
+  @media (min-width: 1400px) {
+    main {
+      max-width: 1560px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      column-gap: 14px;
+      align-items: start;
+    }
+    header, .banner, .tiles, .filters, .event-form { grid-column: 1 / -1; }
+  }
   header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
   h1 { font-size: 20px; margin: 0 0 2px; }
   #updated { color: var(--text-muted); font-size: 13px; }
