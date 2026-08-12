@@ -669,6 +669,7 @@ async function refreshLatest() {
     if (outdoorText) document.getElementById(`tile-${key}-out`).textContent = outdoorText;
   };
   if (!r) { updated.textContent = "no readings yet"; return; }
+  updated.title = new Date(r.ts * 1000).toLocaleString();
   // A quietly aging timestamp is easy to miss; make staleness loud.
   const age = Date.now() / 1000 - r.ts;
   if (age > 600) {
