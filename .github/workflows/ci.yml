@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Format, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Raspberry Pi OS 32-bit (the default recommendation for a Pi 3B)
+          - target: armv7-unknown-linux-musleabihf
+          # Raspberry Pi OS 64-bit
+          - target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # cross runs the build in a Docker container that has the right
+      # C toolchain for the target (needed for bundled SQLite). musl
+      # targets produce fully static binaries that run on any Pi OS.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - run: cross build --release --target ${{ matrix.target }}
+      - run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/pi-garage-monitor" \
+             "dist/pi-garage-monitor-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-garage-monitor-${{ matrix.target }}
+          path: dist/pi-garage-monitor-${{ matrix.target }}
+
+  release:
+    name: Attach binaries to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

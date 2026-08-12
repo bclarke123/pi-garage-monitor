@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garage Monitor</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --page:           #f9f9f7;
+    --surface-1:      #fcfcfb;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --axis:           #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-temp:    #2a78d6;  /* categorical slot 1: blue   */
+    --series-hum:     #eb6834;  /* categorical slot 2: orange */
+    --series-pres:    #1baf7a;  /* categorical slot 3: aqua   */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --page:           #0d0d0d;
+      --surface-1:      #1a1a19;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --axis:           #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-temp:    #3987e5;
+      --series-hum:     #d95926;
+      --series-pres:    #199e70;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-temp:    #3987e5;
+    --series-hum:     #d95926;
+    --series-pres:    #199e70;
+  }
+
+  * { box-sizing: border-box; }
+  body.viz-root {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  #updated { color: var(--text-muted); font-size: 13px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 16px 0; }
+  .tile {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .tile .label { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 7px; }
+  .tile .swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+  .tile .value { font-size: 32px; font-weight: 600; margin-top: 4px; }
+  .tile .value small { font-size: 16px; font-weight: 500; color: var(--text-secondary); }
+
+  .filters { display: flex; gap: 6px; margin: 4px 0 14px; }
+  .filters button {
+    font: inherit; font-size: 13px;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 5px 12px;
+    cursor: pointer;
+  }
+  .filters button:hover { background: var(--surface-1); }
+  .filters button[aria-pressed="true"] {
+    color: var(--text-primary);
+    background: var(--surface-1);
+    border-color: var(--axis);
+    font-weight: 600;
+  }
+
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px 8px;
+    margin-bottom: 14px;
+    position: relative;
+  }
+  .card h2 { font-size: 14px; font-weight: 600; margin: 0 0 8px; color: var(--text-primary); }
+  .card svg { display: block; width: 100%; height: 180px; }
+  .card .empty { color: var(--text-muted); font-size: 13px; padding: 40px 0 60px; text-align: center; }
+
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+    padding: 6px 9px;
+    font-size: 12px;
+    display: none;
+    white-space: nowrap;
+    z-index: 2;
+  }
+  .tooltip .t { color: var(--text-muted); }
+  .tooltip .v { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  svg text { font-family: inherit; font-size: 11px; fill: var(--text-muted); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body class="viz-root">
+<main>
+  <header>
+    <h1>Garage Monitor</h1>
+    <span id="updated">loading…</span>
+  </header>
+
+  <div class="tiles">
+    <div class="tile">
+      <div class="label"><span class="swatch" style="background:var(--series-temp)"></span>Temperature</div>
+      <div class="value" id="tile-temp">–</div>
+    </div>
+    <div class="tile">
+      <div class="label"><span class="swatch" style="background:var(--series-hum)"></span>Humidity</div>
+      <div class="value" id="tile-hum">–</div>
+    </div>
+    <div class="tile">
+      <div class="label"><span class="swatch" style="background:var(--series-pres)"></span>Pressure</div>
+      <div class="value" id="tile-pres">–</div>
+    </div>
+  </div>
+
+  <div class="filters" id="filters" role="group" aria-label="Time range">
+    <button data-hours="24" aria-pressed="true">24h</button>
+    <button data-hours="48" aria-pressed="false">48h</button>
+    <button data-hours="168" aria-pressed="false">7d</button>
+    <button data-hours="720" aria-pressed="false">30d</button>
+  </div>
+
+  <div class="card" id="chart-temp"><h2>Temperature (°C)</h2></div>
+  <div class="card" id="chart-hum"><h2>Relative humidity (%)</h2></div>
+  <div class="card" id="chart-pres"><h2>Pressure (hPa)</h2></div>
+</main>
+
+<script>
+"use strict";
+
+const CHARTS = [
+  { card: "chart-temp", field: "temperature_c", color: "--series-temp", unit: "°C",  decimals: 1 },
+  { card: "chart-hum",  field: "humidity_pct",  color: "--series-hum",  unit: "%",   decimals: 0 },
+  { card: "chart-pres", field: "pressure_hpa",  color: "--series-pres", unit: "hPa", decimals: 1 },
+];
+
+let hours = 24;
+let data = [];
+
+function fmt(v, d) {
+  return v.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+function timeAgo(ts) {
+  const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+  if (s < 90) return `${s}s ago`;
+  if (s < 90 * 60) return `${Math.round(s / 60)}m ago`;
+  if (s < 36 * 3600) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+
+function niceTicks(min, max, count) {
+  if (min === max) { min -= 1; max += 1; }
+  const span = max - min;
+  const step0 = span / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 5, 10].map(m => m * mag).find(s => s >= step0);
+  const start = Math.ceil(min / step) * step;
+  const ticks = [];
+  for (let v = start; v <= max + 1e-9; v += step) ticks.push(v);
+  return ticks;
+}
+
+function xLabel(ts) {
+  const d = new Date(ts * 1000);
+  return hours <= 48
+    ? d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function drawChart(spec) {
+  const card = document.getElementById(spec.card);
+  card.querySelectorAll("svg, .empty, .tooltip").forEach(n => n.remove());
+
+  if (data.length < 2) {
+    const p = document.createElement("div");
+    p.className = "empty";
+    p.textContent = "Not enough data yet — check back after a few readings.";
+    card.appendChild(p);
+    return;
+  }
+
+  const css = getComputedStyle(card);
+  const color = css.getPropertyValue(spec.color).trim();
+  const gridColor = css.getPropertyValue("--grid").trim();
+  const axisColor = css.getPropertyValue("--axis").trim();
+
+  const W = card.clientWidth - 32, H = 180;
+  const M = { top: 8, right: 12, bottom: 22, left: 44 };
+  const iw = W - M.left - M.right, ih = H - M.top - M.bottom;
+
+  const xs = data.map(r => r.ts);
+  const vs = data.map(r => r[spec.field]);
+  const xMin = xs[0], xMax = xs[xs.length - 1];
+  let vMin = Math.min(...vs), vMax = Math.max(...vs);
+  const pad = (vMax - vMin) * 0.12 || 1;
+  vMin -= pad; vMax += pad;
+
+  const X = ts => M.left + ((ts - xMin) / (xMax - xMin)) * iw;
+  const Y = v => M.top + ih - ((v - vMin) / (vMax - vMin)) * ih;
+
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const el = (tag, attrs) => {
+    const n = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    svg.appendChild(n);
+    return n;
+  };
+
+  const yTicks = niceTicks(vMin, vMax, 4);
+  // Enough decimals that adjacent ticks never print the same value.
+  const step = yTicks.length > 1 ? yTicks[1] - yTicks[0] : 1;
+  const tickDecimals = Math.max(spec.decimals, Math.max(0, -Math.floor(Math.log10(step))));
+  for (const t of yTicks) {
+    const y = Y(t);
+    el("line", { x1: M.left, x2: M.left + iw, y1: y, y2: y, stroke: gridColor, "stroke-width": 1 });
+    const label = el("text", { x: M.left - 7, y: y + 3.5, "text-anchor": "end" });
+    label.textContent = fmt(t, tickDecimals);
+  }
+  el("line", { x1: M.left, x2: M.left + iw, y1: M.top + ih, y2: M.top + ih, stroke: axisColor, "stroke-width": 1 });
+
+  const nx = Math.max(2, Math.floor(iw / 130));
+  for (let i = 0; i <= nx; i++) {
+    const ts = xMin + ((xMax - xMin) * i) / nx;
+    const label = el("text", {
+      x: X(ts), y: M.top + ih + 15,
+      "text-anchor": i === 0 ? "start" : i === nx ? "end" : "middle",
+    });
+    label.textContent = xLabel(ts);
+  }
+
+  const path = data.map((r, i) => `${i ? "L" : "M"}${X(r.ts).toFixed(1)},${Y(r[spec.field]).toFixed(1)}`).join("");
+  el("path", { d: path, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" });
+
+  // Hover layer: crosshair + marker + tooltip across the whole plot area.
+  const crosshair = el("line", { y1: M.top, y2: M.top + ih, stroke: axisColor, "stroke-width": 1, visibility: "hidden" });
+  const marker = el("circle", { r: 4.5, fill: color, stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden" });
+  const tooltip = document.createElement("div");
+  tooltip.className = "tooltip";
+  card.appendChild(tooltip);
+
+  const overlay = el("rect", { x: M.left, y: M.top, width: iw, height: ih, fill: "transparent" });
+  overlay.addEventListener("mousemove", ev => {
+    const rect = svg.getBoundingClientRect();
+    const ts = xMin + ((ev.clientX - rect.left) * (W / rect.width) - M.left) / iw * (xMax - xMin);
+    let best = 0;
+    for (let i = 1; i < data.length; i++) {
+      if (Math.abs(data[i].ts - ts) < Math.abs(data[best].ts - ts)) best = i;
+    }
+    const r = data[best];
+    const px = X(r.ts), py = Y(r[spec.field]);
+    crosshair.setAttribute("x1", px); crosshair.setAttribute("x2", px);
+    crosshair.setAttribute("visibility", "visible");
+    marker.setAttribute("cx", px); marker.setAttribute("cy", py);
+    marker.setAttribute("visibility", "visible");
+    const d = new Date(r.ts * 1000);
+    tooltip.innerHTML =
+      `<span class="t">${d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span><br>` +
+      `<span class="v">${fmt(r[spec.field], spec.decimals)} ${spec.unit}</span>`;
+    tooltip.style.display = "block";
+    const scale = rect.width / W;
+    const left = Math.min(px * scale + 14, rect.width - tooltip.offsetWidth - 4);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${py * scale + 18}px`;
+  });
+  overlay.addEventListener("mouseleave", () => {
+    crosshair.setAttribute("visibility", "hidden");
+    marker.setAttribute("visibility", "hidden");
+    tooltip.style.display = "none";
+  });
+
+  card.appendChild(svg);
+}
+
+function drawAll() { CHARTS.forEach(drawChart); }
+
+async function refreshLatest() {
+  const r = await (await fetch("/api/latest")).json();
+  const updated = document.getElementById("updated");
+  if (!r) { updated.textContent = "no readings yet"; return; }
+  updated.textContent = `updated ${timeAgo(r.ts)}`;
+  document.getElementById("tile-temp").innerHTML = `${fmt(r.temperature_c, 1)} <small>°C</small>`;
+  document.getElementById("tile-hum").innerHTML = `${fmt(r.humidity_pct, 0)} <small>%</small>`;
+  document.getElementById("tile-pres").innerHTML = `${fmt(r.pressure_hpa, 1)} <small>hPa</small>`;
+}
+
+async function refreshHistory() {
+  data = await (await fetch(`/api/readings?hours=${hours}`)).json();
+  drawAll();
+}
+
+document.getElementById("filters").addEventListener("click", ev => {
+  const btn = ev.target.closest("button[data-hours]");
+  if (!btn) return;
+  hours = Number(btn.dataset.hours);
+  for (const b of document.querySelectorAll("#filters button")) {
+    b.setAttribute("aria-pressed", String(b === btn));
+  }
+  refreshHistory();
+});
+
+let resizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(drawAll, 150);
+});
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
+
+refreshLatest();
+refreshHistory();
+setInterval(() => { refreshLatest(); refreshHistory(); }, 60_000);
+</script>
+</body>
+</html>

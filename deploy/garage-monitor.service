@@ -1,0 +1,19 @@
+[Unit]
+Description=Garage temperature/humidity monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/pi-garage-monitor \
+    --db /var/lib/garage-monitor/garage.db \
+    --listen 0.0.0.0:8080 \
+    --interval-secs 60
+# Creates /var/lib/garage-monitor owned by the service user.
+StateDirectory=garage-monitor
+User=pi
+SupplementaryGroups=i2c
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
