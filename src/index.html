@@ -912,11 +912,20 @@ document.getElementById("event-save").addEventListener("click", async () => {
   refreshHistory();
 });
 
-refreshLatest();
-refreshHistory();
-refreshRecords();
-refreshRisk();
-setInterval(() => { refreshLatest(); refreshHistory(); refreshRecords(); refreshRisk(); }, 60_000);
+function refreshAll() { refreshLatest(); refreshHistory(); refreshRecords(); refreshRisk(); }
+refreshAll();
+
+// The server pushes a note over SSE the moment a reading or outdoor
+// observation is stored, so refreshes track real data arrival instead of
+// polling on a drifting timer. The short debounce coalesces back-to-back
+// events; EventSource reconnects on its own, and the slow poll below is a
+// safety net in case the stream ever wedges silently.
+let refreshQueued;
+new EventSource("/api/stream").onmessage = () => {
+  clearTimeout(refreshQueued);
+  refreshQueued = setTimeout(refreshAll, 300);
+};
+setInterval(refreshAll, 300_000);
 </script>
 </body>
 </html>

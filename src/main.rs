@@ -46,6 +46,16 @@ struct Args {
     longitude: Option<f64>,
 }
 
+/// A "new data just landed" note, broadcast from the sampler threads to the
+/// dashboard's server-sent-events stream.
+#[derive(Debug, Clone, Copy)]
+pub enum DataEvent {
+    /// A new indoor sensor reading was stored.
+    Reading,
+    /// A new outdoor weather observation was stored.
+    Outdoor,
+}
+
 /// Returns the current Unix time in seconds.
 ///
 /// # Panics
@@ -72,9 +82,14 @@ async fn main() -> Result<()> {
         sensor::Sensor::bme280()?
     };
 
+    // Capacity is generous: events arrive once a minute and a slow SSE
+    // consumer only ever needs the latest one.
+    let (events, _) = tokio::sync::broadcast::channel::<DataEvent>(16);
+
     let sampler_db = db.clone();
+    let sampler_events = events.clone();
     let interval = Duration::from_secs(args.interval_secs.max(1));
-    std::thread::spawn(move || sensor::run_sampler(sensor, sampler_db, interval));
+    std::thread::spawn(move || sensor::run_sampler(sensor, sampler_db, interval, sampler_events));
 
     if let (Some(latitude), Some(longitude)) = (args.latitude, args.longitude) {
         let coordinates = weather::Coordinates {
@@ -82,8 +97,9 @@ async fn main() -> Result<()> {
             longitude,
         };
         let weather_db = db.clone();
-        std::thread::spawn(move || weather::run_poller(coordinates, weather_db));
+        let weather_events = events.clone();
+        std::thread::spawn(move || weather::run_poller(coordinates, weather_db, weather_events));
     }
 
-    web::serve(db, args.listen).await
+    web::serve(db, args.listen, events).await
 }

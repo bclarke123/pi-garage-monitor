@@ -5,20 +5,25 @@
 //! `/api/latest` (most recent reading) and `/api/readings?hours=N`
 //! (bucket-averaged history, capped at roughly 1000 points).
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRef, Path, Query, State};
 use axum::http::{StatusCode, header};
+use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
+use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::db::{DailyExtremes, DayRisk, Db, DeltaPoint, Event, OutdoorReading, Reading, Records};
 use crate::system::{self, Stats};
-use crate::unix_ts_now;
 use crate::weather::{self, Assessment};
+use crate::{DataEvent, unix_ts_now};
 
 const INDEX_HTML: &str = include_str!("index.html");
 
@@ -28,11 +33,30 @@ const MAX_HOURS: u32 = 24 * 366;
 /// Rough cap on points returned per query; keeps chart payloads small.
 const MAX_POINTS: i64 = 1000;
 
+/// Shared state for all handlers; most only need the [`Db`] half.
+#[derive(Debug, Clone)]
+struct AppState {
+    db: Db,
+    events: broadcast::Sender<DataEvent>,
+}
+
+impl FromRef<AppState> for Db {
+    fn from_ref(input: &AppState) -> Self {
+        input.db.clone()
+    }
+}
+
+impl FromRef<AppState> for broadcast::Sender<DataEvent> {
+    fn from_ref(input: &AppState) -> Self {
+        input.events.clone()
+    }
+}
+
 /// Serves the dashboard on `listen` until the process exits.
 ///
 /// # Errors
 /// Returns an error if the listener cannot bind or the server fails.
-pub async fn serve(db: Db, listen: SocketAddr) -> Result<()> {
+pub async fn serve(db: Db, listen: SocketAddr, events: broadcast::Sender<DataEvent>) -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/latest", get(latest))
@@ -41,13 +65,14 @@ pub async fn serve(db: Db, listen: SocketAddr) -> Result<()> {
         .route("/api/daily", get(daily))
         .route("/api/conditions", get(conditions))
         .route("/api/outdoor", get(outdoor))
+        .route("/api/stream", get(stream))
         .route("/api/risk", get(risk))
         .route("/api/delta", get(delta))
         .route("/api/events", get(list_events).post(create_event))
         .route("/api/events/{id}", axum::routing::delete(delete_event))
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
-        .with_state(db);
+        .with_state(AppState { db, events });
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding {listen}"))?;
@@ -136,6 +161,24 @@ async fn outdoor(
     let rows =
         tokio::task::spawn_blocking(move || db.outdoor_since(from_ts, bucket_secs)).await??;
     Ok(Json(rows))
+}
+
+/// Server-sent events: one message per stored reading ("reading") or
+/// outdoor observation ("outdoor"), so the dashboard refreshes the moment
+/// data lands instead of polling on a drifting timer.
+async fn stream(
+    State(events): State<broadcast::Sender<DataEvent>>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<sse::Event, Infallible>>> {
+    let stream = BroadcastStream::new(events.subscribe()).filter_map(|item| {
+        // A lagged receiver just skips ahead; every message means the same
+        // thing ("go fetch"), so dropped ones cost nothing.
+        let name = match item.ok()? {
+            DataEvent::Reading => "reading",
+            DataEvent::Outdoor => "outdoor",
+        };
+        Some(Ok(sse::Event::default().data(name)))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 async fn list_events(State(db): State<Db>) -> Result<Json<Vec<Event>>, AppError> {

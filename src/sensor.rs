@@ -91,19 +91,28 @@ fn mock_reading(now: i64) -> Reading {
     clippy::needless_pass_by_value,
     reason = "the sampler thread owns its Db handle for the process lifetime"
 )]
-pub fn run_sampler(mut sensor: Sensor, db: Db, interval: Duration) {
+pub fn run_sampler(
+    mut sensor: Sensor,
+    db: Db,
+    interval: Duration,
+    events: tokio::sync::broadcast::Sender<crate::DataEvent>,
+) {
     loop {
         match sensor.read() {
             Ok(reading) => match db.insert(&reading) {
-                Ok(()) => tracing::event!(
-                    name: "sensor.read.success",
-                    tracing::Level::INFO,
-                    reading.ts = reading.ts,
-                    reading.temperature_c = reading.temperature_c,
-                    reading.humidity_pct = reading.humidity_pct,
-                    reading.pressure_hpa = reading.pressure_hpa,
-                    "stored reading",
-                ),
+                Ok(()) => {
+                    // No receivers (nobody watching the dashboard) is fine.
+                    let _ = events.send(crate::DataEvent::Reading);
+                    tracing::event!(
+                        name: "sensor.read.success",
+                        tracing::Level::INFO,
+                        reading.ts = reading.ts,
+                        reading.temperature_c = reading.temperature_c,
+                        reading.humidity_pct = reading.humidity_pct,
+                        reading.pressure_hpa = reading.pressure_hpa,
+                        "stored reading",
+                    );
+                }
                 Err(error) => tracing::event!(
                     name: "db.insert.failure",
                     tracing::Level::ERROR,

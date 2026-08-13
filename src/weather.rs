@@ -39,17 +39,25 @@ pub struct Coordinates {
     clippy::needless_pass_by_value,
     reason = "the poller thread owns its Db handle for the process lifetime"
 )]
-pub fn run_poller(coordinates: Coordinates, db: Db) {
+pub fn run_poller(
+    coordinates: Coordinates,
+    db: Db,
+    events: tokio::sync::broadcast::Sender<crate::DataEvent>,
+) {
     loop {
         match fetch_current(coordinates) {
             Ok(outdoor) => match db.insert_outdoor(&outdoor) {
-                Ok(()) => tracing::event!(
-                    name: "weather.fetch.success",
-                    tracing::Level::INFO,
-                    outdoor.temperature_c = outdoor.temperature_c,
-                    outdoor.dew_point_c = outdoor.dew_point_c,
-                    "stored outdoor reading",
-                ),
+                Ok(()) => {
+                    // No receivers (nobody watching the dashboard) is fine.
+                    let _ = events.send(crate::DataEvent::Outdoor);
+                    tracing::event!(
+                        name: "weather.fetch.success",
+                        tracing::Level::INFO,
+                        outdoor.temperature_c = outdoor.temperature_c,
+                        outdoor.dew_point_c = outdoor.dew_point_c,
+                        "stored outdoor reading",
+                    );
+                }
                 Err(error) => tracing::event!(
                     name: "weather.store.failure",
                     tracing::Level::ERROR,
