@@ -84,6 +84,11 @@
     header, .banner, .tiles, .filters, .event-form { grid-column: 1 / -1; }
   }
   header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
+  /* On narrow screens the status line always sits under the title; letting
+     it bounce between same-line and wrapped as its width varies is jarring. */
+  @media (max-width: 500px) {
+    header > span { flex-basis: 100%; }
+  }
   h1 { font-size: 20px; margin: 0 0 2px; }
   #updated { color: var(--text-muted); font-size: 13px; }
 
