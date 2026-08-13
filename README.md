@@ -101,7 +101,7 @@ open http://localhost:8080
 - `GET /api/latest` — most recent reading
 - `GET /api/readings?hours=24` — history, bucket-averaged to ≤ ~1000 points
 - `GET /api/outdoor?hours=24` — outdoor observation history, bucket-averaged the same way; empty until weather polling is enabled
-- `GET /api/stream` — server-sent events; emits a `reading` or `outdoor` event the moment new data is stored, each carrying the full `/api/conditions` JSON (the dashboard applies it directly instead of polling)
+- `GET /api/stream` — server-sent events; emits a `reading` or `outdoor` event the moment new data is stored (each carrying the full `/api/conditions` JSON) and an `events` event carrying the full timeline whenever an event is added or deleted — the dashboard applies these directly instead of polling
 - `GET /api/records` — all-time extremes (high/low temperature and humidity, each with its timestamp)
 - `GET /api/daily?days=30` — per-local-calendar-day temperature min/max
 - `GET /api/conditions` — latest indoor + outdoor state plus the condensation assessment (`status.level` is `ok`/`warning`/`critical`)

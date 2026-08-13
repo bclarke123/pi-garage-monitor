@@ -54,6 +54,8 @@ pub enum DataEvent {
     Reading,
     /// A new outdoor weather observation was stored.
     Outdoor,
+    /// The renovation-event timeline changed (event added or deleted).
+    Events,
 }
 
 /// Returns the current Unix time in seconds.

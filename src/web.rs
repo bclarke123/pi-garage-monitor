@@ -177,27 +177,34 @@ async fn stream(
             async move {
                 // A lagged receiver just skips ahead; every message carries
                 // the full current state, so dropped ones cost nothing.
-                let kind = match item.ok()? {
-                    DataEvent::Reading => "reading",
-                    DataEvent::Outdoor => "outdoor",
-                };
-                let conditions = match current_conditions(db).await {
-                    Ok(conditions) => conditions,
+                let kind = item.ok()?;
+                let built: anyhow::Result<sse::Event> = async {
+                    Ok(match kind {
+                        DataEvent::Reading => sse::Event::default()
+                            .event("reading")
+                            .json_data(&current_conditions(db).await?)?,
+                        DataEvent::Outdoor => sse::Event::default()
+                            .event("outdoor")
+                            .json_data(&current_conditions(db).await?)?,
+                        DataEvent::Events => {
+                            let list = tokio::task::spawn_blocking(move || db.events()).await??;
+                            sse::Event::default().event("events").json_data(&list)?
+                        }
+                    })
+                }
+                .await;
+                match built {
+                    Ok(event) => Some(Ok(event)),
                     Err(error) => {
                         tracing::event!(
                             name: "server.stream.failure",
                             tracing::Level::ERROR,
                             error.message = %error,
-                            "failed to build SSE conditions payload",
+                            "failed to build SSE payload",
                         );
-                        return None;
+                        None
                     }
-                };
-                sse::Event::default()
-                    .event(kind)
-                    .json_data(&conditions)
-                    .ok()
-                    .map(Ok)
+                }
             }
         })
         .filter_map(std::convert::identity);
@@ -218,6 +225,7 @@ struct NewEvent {
 
 async fn create_event(
     State(db): State<Db>,
+    State(events): State<broadcast::Sender<DataEvent>>,
     Json(new_event): Json<NewEvent>,
 ) -> Result<(StatusCode, Json<Event>), AppError> {
     let label = new_event.label.trim().to_owned();
@@ -232,16 +240,22 @@ async fn create_event(
         Ok(Event { id, ts, label })
     })
     .await??;
+    let _ = events.send(DataEvent::Events);
     Ok((StatusCode::CREATED, Json(event)))
 }
 
-async fn delete_event(State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, AppError> {
+async fn delete_event(
+    State(db): State<Db>,
+    State(events): State<broadcast::Sender<DataEvent>>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, AppError> {
     let existed = tokio::task::spawn_blocking(move || db.delete_event(id)).await??;
-    Ok(if existed {
-        StatusCode::NO_CONTENT
+    if existed {
+        let _ = events.send(DataEvent::Events);
+        Ok(StatusCode::NO_CONTENT)
     } else {
-        StatusCode::NOT_FOUND
-    })
+        Ok(StatusCode::NOT_FOUND)
+    }
 }
 
 async fn risk(

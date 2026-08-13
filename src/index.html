@@ -807,14 +807,21 @@ function applyConditions(c) {
 }
 
 async function refreshHistory() {
-  [data, outdoorData, deltaData, dailyData, timelineEvents] = await Promise.all([
+  [data, outdoorData, deltaData, dailyData] = await Promise.all([
     (await fetch(`/api/readings?hours=${hours}`)).json(),
     (await fetch(`/api/outdoor?hours=${hours}`)).json(),
     (await fetch(`/api/delta?hours=${hours}`)).json(),
     (await fetch("/api/daily?days=30")).json(),
-    (await fetch("/api/events")).json(),
   ]);
   swingData = computeSwing(dailyData);
+  drawAll();
+}
+
+// The event timeline only changes on user action, so it isn't polled: it's
+// fetched once at startup and thereafter pushed over SSE whenever anyone
+// (on any device) saves or deletes an event.
+async function refreshEvents() {
+  timelineEvents = await (await fetch("/api/events")).json();
   drawAll();
 }
 
@@ -913,10 +920,12 @@ document.getElementById("event-save").addEventListener("click", async () => {
   });
   document.getElementById("event-label").value = "";
   eventForm.hidden = true;
-  refreshHistory();
+  // The SSE push delivers the new marker (to every open dashboard); this
+  // direct fetch is just insurance in case the stream is reconnecting.
+  refreshEvents();
 });
 
-function refreshAll() { refreshLatest(); refreshHistory(); refreshRecords(); refreshRisk(); }
+function refreshAll() { refreshLatest(); refreshHistory(); refreshRecords(); refreshRisk(); refreshEvents(); }
 refreshAll();
 
 // The server pushes the full /api/conditions payload over SSE the moment a
@@ -934,6 +943,7 @@ const onPush = e => {
 const es = new EventSource("/api/stream");
 es.addEventListener("reading", onPush);
 es.addEventListener("outdoor", onPush);
+es.addEventListener("events", e => { timelineEvents = JSON.parse(e.data); drawAll(); });
 setInterval(refreshAll, 300_000);
 </script>
 </body>
