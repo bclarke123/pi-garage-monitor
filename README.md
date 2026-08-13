@@ -8,20 +8,33 @@ as roofing and insulation go in.
 ## Hardware
 
 - Raspberry Pi 3B running Raspberry Pi OS
-- BME280 breakout board (I²C, address `0x76` — the common GY-BME280 default)
-- 4 female-to-female jumper wires
+- BME280 breakout board, 3.3V 6-pin variant (GY-BME280)
+- 6 female-to-female jumper wires
 
 ### Wiring
 
-| BME280 pin | Pi pin | Pi header position |
-|------------|--------|--------------------|
-| VIN / VCC  | 3.3V   | pin 1              |
-| GND        | GND    | pin 6              |
-| SDA        | SDA1   | pin 3 (GPIO 2)     |
-| SCL        | SCL1   | pin 5 (GPIO 3)     |
+All six sensor pins land directly on the Pi header — no splices. CSB and
+SDO are strapped at the Pi end: CSB high locks the chip into I²C mode, and
+SDO low selects address `0x76` (the address the daemon initializes).
+
+| BME280 pin | Purpose                        | Pi header pin  |
+|------------|--------------------------------|----------------|
+| VCC        | power                          | 1 (3.3V)       |
+| SDA        | I²C data                       | 3 (GPIO 2)     |
+| SCL        | I²C clock                      | 5 (GPIO 3)     |
+| GND        | ground                         | 6 (GND)        |
+| SDO        | → GND selects address `0x76`   | 9 (GND)        |
+| CSB        | → 3.3V locks I²C mode          | 17 (3.3V)      |
+
+Header counting: pin 1 is the corner pin nearest the SD card (square pad);
+odd pins are the row toward the middle of the board, even pins the row
+along the board edge. Match the sensor end by silkscreen label, not
+physical order — pin order varies between breakout revisions.
 
 Keep the sensor a short distance away from the Pi itself — the SoC's heat
 skews readings by a degree or two if the board sits directly above it.
+Connect and disconnect only with the Pi powered off; hotplugging the GPIO
+header can brown out the board.
 
 ### Enable I²C and verify the sensor
 
@@ -63,6 +76,30 @@ journalctl -u garage-monitor -f   # watch it take its first readings
 
 Then open <http://garage-pi.local:8080> from anything on your network.
 The dashboard shows current values plus charts over 24h/48h/7d/30d.
+
+## Cutting over from mock mode
+
+If the daemon has been running with a `--mock` override while waiting on
+hardware, switch to the real sensor with a blank database (mock-era data
+would pollute the baseline):
+
+```sh
+# with the sensor wired up (Pi powered off during connection):
+i2cdetect -y 1                       # must show 76 before going further
+
+sudo systemctl stop garage-monitor
+sudo systemctl revert garage-monitor # removes the --mock override drop-in
+sudo rm /var/lib/garage-monitor/garage.db
+sudo systemctl start garage-monitor
+
+journalctl -u garage-monitor -f      # watch for sensor.read.success
+```
+
+The schema is recreated automatically on first start; records, daily
+history, and risk assessments all begin fresh from the first real reading.
+The dashboard needs no changes — reload it and the empty-state messages
+fill in as data accumulates (charts after a few readings, daily ranges
+after the first day, the outdoor delta within ~30 minutes).
 
 ## Outdoor weather &amp; condensation warnings (optional)
 
