@@ -945,10 +945,29 @@ const onPush = e => {
   clearTimeout(refreshQueued);
   refreshQueued = setTimeout(() => { refreshHistory(); refreshRecords(); refreshRisk(); }, 300);
 };
-const es = new EventSource("/api/stream");
-es.addEventListener("reading", onPush);
-es.addEventListener("outdoor", onPush);
-es.addEventListener("events", e => { timelineEvents = JSON.parse(e.data); drawAll(); });
+const onEventsPush = e => { timelineEvents = JSON.parse(e.data); drawAll(); };
+
+// The stream is torn down when the tab hides and rebuilt when it shows:
+// mobile browsers kill background sockets, and a woken EventSource can sit
+// in reconnect backoff for a minute before noticing. Closing eagerly makes
+// wake-up deterministic — fresh socket + one catch-up refresh, instantly.
+let es = null;
+function connectStream() {
+  if (es) return;
+  es = new EventSource("/api/stream");
+  es.addEventListener("reading", onPush);
+  es.addEventListener("outdoor", onPush);
+  es.addEventListener("events", onEventsPush);
+}
+connectStream();
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    if (es) { es.close(); es = null; }
+  } else {
+    refreshAll();
+    connectStream();
+  }
+});
 setInterval(refreshAll, 300_000);
 </script>
 </body>
