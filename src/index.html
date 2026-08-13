@@ -658,6 +658,29 @@ const STATUS = {
   critical: { color: "#d03b3b", icon: "✕", label: "Alert" },
 };
 
+let lastReadingTs = null;
+
+// Re-rendered every second so "updated Ns ago" counts honestly instead of
+// sitting frozen between the 60 s data refreshes.
+function renderUpdated() {
+  if (lastReadingTs === null) return;
+  const updated = document.getElementById("updated");
+  const age = Date.now() / 1000 - lastReadingTs;
+  const stamp = new Date(lastReadingTs * 1000).toLocaleString();
+  // A quietly aging timestamp is easy to miss; make staleness loud — but
+  // compact, so the header keeps the same footprint across states.
+  if (age > 600) {
+    updated.textContent = `▲ updated ${timeAgo(lastReadingTs)}`;
+    updated.title = `Sensor may be down — last reading ${stamp}`;
+    updated.style.color = STATUS.warning.color;
+  } else {
+    updated.textContent = `updated ${timeAgo(lastReadingTs)}`;
+    updated.title = stamp;
+    updated.style.color = "";
+  }
+}
+setInterval(renderUpdated, 1000);
+
 async function refreshLatest() {
   const c = await (await fetch("/api/conditions")).json();
   const updated = document.getElementById("updated");
@@ -689,19 +712,8 @@ async function refreshLatest() {
     if (outdoorText) document.getElementById(`tile-${key}-out`).textContent = outdoorText;
   };
   if (!r) { updated.textContent = "no readings yet"; return; }
-  // A quietly aging timestamp is easy to miss; make staleness loud — but
-  // compact, so the header keeps the same footprint across states.
-  const age = Date.now() / 1000 - r.ts;
-  const stamp = new Date(r.ts * 1000).toLocaleString();
-  if (age > 600) {
-    updated.textContent = `▲ updated ${timeAgo(r.ts)}`;
-    updated.title = `Sensor may be down — last reading ${stamp}`;
-    updated.style.color = STATUS.warning.color;
-  } else {
-    updated.textContent = `updated ${timeAgo(r.ts)}`;
-    updated.title = stamp;
-    updated.style.color = "";
-  }
+  lastReadingTs = r.ts;
+  renderUpdated();
   const o = c.outdoor;
   hasOutdoor = Boolean(o);
   setTile("temp", fmt(r.temperature_c, 1), o && fmt(o.temperature_c, 1));
