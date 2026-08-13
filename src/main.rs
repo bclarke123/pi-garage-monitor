@@ -7,6 +7,7 @@
 
 mod db;
 mod sensor;
+mod system;
 mod weather;
 mod web;
 

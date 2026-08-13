@@ -16,6 +16,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{DailyExtremes, DayRisk, Db, DeltaPoint, Event, OutdoorReading, Reading, Records};
+use crate::system::{self, Stats};
 use crate::unix_ts_now;
 use crate::weather::{self, Assessment};
 
@@ -183,28 +184,14 @@ struct Conditions {
     indoor: Option<Reading>,
     outdoor: Option<OutdoorReading>,
     status: Option<Assessment>,
-    cpu_temp_c: Option<f64>,
-}
-
-/// Reads the Pi `SoC` temperature from sysfs (Linux only).
-///
-/// A sanity cross-check for the BME280 and an early warning if the Pi
-/// itself is overheating in a summer garage.
-#[cfg(target_os = "linux")]
-fn cpu_temp_c() -> Option<f64> {
-    let raw = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
-    // The file holds millidegrees Celsius, e.g. "54608".
-    raw.trim().parse::<f64>().ok().map(|milli| milli / 1000.0)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn cpu_temp_c() -> Option<f64> {
-    None
+    system: Stats,
 }
 
 async fn conditions(State(db): State<Db>) -> Result<Json<Conditions>, AppError> {
-    let (indoor, outdoor) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        Ok((db.latest()?, db.latest_outdoor()?))
+    // system::sample() reads procfs/sysfs (and may briefly sleep for its
+    // first CPU baseline), so it belongs on the blocking pool too.
+    let (indoor, outdoor, system) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        Ok((db.latest()?, db.latest_outdoor()?, system::sample()))
     })
     .await??;
     let outdoor = outdoor.filter(|o| unix_ts_now() - o.ts <= OUTDOOR_STALE_SECS);
@@ -215,7 +202,7 @@ async fn conditions(State(db): State<Db>) -> Result<Json<Conditions>, AppError> 
         indoor,
         outdoor,
         status,
-        cpu_temp_c: cpu_temp_c(),
+        system,
     }))
 }
 

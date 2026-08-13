@@ -6,7 +6,7 @@
 //! stores them alongside the indoor readings. [`assess`] combines indoor
 //! and outdoor state into a dashboard warning: condensation — warm humid
 //! air meeting cold surfaces — is what actually destroys electronics in a
-//! semi-conditioned space, more than cold itself.
+//! semi-conditioned space, and frost is what kills the houseplants.
 
 use std::time::Duration;
 
@@ -117,19 +117,19 @@ pub fn dew_point_c(temperature_c: f64, humidity_pct: f64) -> f64 {
     B * gamma / (A - gamma)
 }
 
-/// Severity of a condensation assessment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Severity of a risk assessment; declaration order is severity order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
-    /// No condensation risk.
+    /// Nothing to worry about.
     Ok,
-    /// Conditions are drifting toward condensation.
+    /// Conditions are drifting toward damage.
     Warning,
-    /// Condensation is likely happening now.
+    /// Damaging conditions are likely happening now.
     Critical,
 }
 
-/// A condensation-risk verdict for the dashboard banner.
+/// A risk verdict for the dashboard banner.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Assessment {
     /// Severity level.
@@ -142,14 +142,18 @@ pub struct Assessment {
     pub dew_point_spread_c: f64,
 }
 
-/// Assesses condensation risk from indoor conditions and, when available,
-/// outdoor conditions.
+/// Assesses condensation and frost risk from indoor conditions and, when
+/// available, outdoor conditions.
 ///
-/// The two failure modes it watches for:
+/// The failure modes it watches for:
 /// - indoor air already near saturation (spread between temperature and
 ///   dew point closing to zero — moisture will film onto every surface);
 /// - outdoor dew point above indoor temperature (opening the door lets air
-///   in that will condense onto still-cold contents).
+///   in that will condense onto still-cold contents);
+/// - indoor temperature at or approaching freezing (frost kills houseplants
+///   and anything that holds water long before it bothers electronics).
+///
+/// The worst level wins; a doubly bad day reports both problems.
 #[must_use]
 pub fn assess(indoor: &Reading, outdoor: Option<&OutdoorReading>) -> Assessment {
     // Spreads below these thresholds are the standard "condensation watch"
@@ -157,11 +161,15 @@ pub fn assess(indoor: &Reading, outdoor: Option<&OutdoorReading>) -> Assessment 
     // sensor error (±0.5 °C) is accounted for.
     const SPREAD_CRITICAL_C: f64 = 1.0;
     const SPREAD_WARNING_C: f64 = 3.0;
+    // Frost bands: air at 0.5 °C means colder surfaces (floor, window
+    // glass) are already below freezing; 3 °C is the "move the plants" band.
+    const FROST_CRITICAL_C: f64 = 0.5;
+    const FROST_WARNING_C: f64 = 3.0;
 
     let indoor_dew_point_c = dew_point_c(indoor.temperature_c, indoor.humidity_pct);
     let dew_point_spread_c = indoor.temperature_c - indoor_dew_point_c;
 
-    let (level, message) = if dew_point_spread_c < SPREAD_CRITICAL_C {
+    let condensation = if dew_point_spread_c < SPREAD_CRITICAL_C {
         (
             Level::Critical,
             "Indoor air is saturated — condensation is likely forming on surfaces right now."
@@ -185,7 +193,43 @@ pub fn assess(indoor: &Reading, outdoor: Option<&OutdoorReading>) -> Assessment 
             ),
         )
     } else {
-        (Level::Ok, "No condensation risk.".to_owned())
+        (Level::Ok, String::new())
+    };
+
+    let frost = if indoor.temperature_c <= FROST_CRITICAL_C {
+        (
+            Level::Critical,
+            format!(
+                "Freezing in here ({:.1} °C) — frost damages houseplants and anything that \
+                 holds water.",
+                indoor.temperature_c
+            ),
+        )
+    } else if indoor.temperature_c <= FROST_WARNING_C {
+        (
+            Level::Warning,
+            format!(
+                "Near freezing ({:.1} °C) — cold spots at the floor can frost before the air \
+                 does. Move houseplants somewhere warmer.",
+                indoor.temperature_c
+            ),
+        )
+    } else {
+        (Level::Ok, String::new())
+    };
+
+    let level = condensation.0.max(frost.0);
+    let message = if level == Level::Ok {
+        "No condensation or frost risk.".to_owned()
+    } else {
+        let mut issues = [condensation, frost];
+        issues.sort_by_key(|(issue_level, _)| std::cmp::Reverse(*issue_level)); // most severe first
+        let texts: Vec<String> = issues
+            .into_iter()
+            .filter(|(issue_level, _)| *issue_level != Level::Ok)
+            .map(|(_, text)| text)
+            .collect();
+        texts.join(" ")
     };
 
     Assessment {
@@ -196,7 +240,7 @@ pub fn assess(indoor: &Reading, outdoor: Option<&OutdoorReading>) -> Assessment 
     }
 }
 
-/// Classifies one past day's condensation risk from its aggregates.
+/// Classifies one past day's risk from its aggregates.
 ///
 /// `max_outdoor_dew_point_c` is compared against the day's *minimum* indoor
 /// temperature: surfaces lag air temperature, so the daily low is the best
@@ -212,12 +256,18 @@ pub fn assess_day(
     // ~1 °C; a quarter hour near saturation is a genuine damp spell.
     const SATURATED_CRITICAL_MINUTES: u32 = 5;
     const NEAR_SATURATION_WARNING_MINUTES: u32 = 15;
+    // Retrospective frost only flags an actual sub-zero dip, not the wider
+    // "approaching freezing" band the live banner warns about.
+    const FROST_C: f64 = 0.0;
 
     let incoming_air_risk =
         max_outdoor_dew_point_c.is_some_and(|dew_point| dew_point > min_temperature_c);
     if saturated_minutes >= SATURATED_CRITICAL_MINUTES {
         Level::Critical
-    } else if near_saturation_minutes >= NEAR_SATURATION_WARNING_MINUTES || incoming_air_risk {
+    } else if near_saturation_minutes >= NEAR_SATURATION_WARNING_MINUTES
+        || incoming_air_risk
+        || min_temperature_c <= FROST_C
+    {
         Level::Warning
     } else {
         Level::Ok
@@ -289,6 +339,34 @@ mod tests {
     #[test]
     fn brief_blips_and_dry_days_are_ok() {
         assert_eq!(assess_day(2, 10, 10.0, Some(4.0)), Level::Ok);
+    }
+
+    #[test]
+    fn freezing_indoor_air_is_critical() {
+        let a = assess(&indoor(-4.0, 50.0), None);
+        assert_eq!(a.level, Level::Critical);
+        assert!(a.message.contains("Freezing"));
+    }
+
+    #[test]
+    fn near_freezing_indoor_air_is_warning() {
+        let a = assess(&indoor(2.0, 40.0), None);
+        assert_eq!(a.level, Level::Warning);
+        assert!(a.message.contains("Near freezing"));
+    }
+
+    #[test]
+    fn cold_and_saturated_reports_both_problems() {
+        let a = assess(&indoor(-1.0, 99.0), None);
+        assert_eq!(a.level, Level::Critical);
+        assert!(a.message.contains("saturated"));
+        assert!(a.message.contains("Freezing"));
+    }
+
+    #[test]
+    fn day_dipping_below_freezing_is_warning() {
+        assert_eq!(assess_day(0, 0, -2.0, None), Level::Warning);
+        assert_eq!(assess_day(0, 0, 1.5, None), Level::Ok);
     }
 
     #[test]
