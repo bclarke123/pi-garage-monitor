@@ -163,21 +163,44 @@ async fn outdoor(
     Ok(Json(rows))
 }
 
-/// Server-sent events: one message per stored reading ("reading") or
-/// outdoor observation ("outdoor"), so the dashboard refreshes the moment
-/// data lands instead of polling on a drifting timer.
+/// Server-sent events: one message per stored reading (`event: reading`) or
+/// outdoor observation (`event: outdoor`), each carrying the same JSON as
+/// `/api/conditions`. The dashboard applies the payload directly — no
+/// follow-up request — and only re-fetches its window-dependent charts.
 async fn stream(
-    State(events): State<broadcast::Sender<DataEvent>>,
+    State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<sse::Event, Infallible>>> {
-    let stream = BroadcastStream::new(events.subscribe()).filter_map(|item| {
-        // A lagged receiver just skips ahead; every message means the same
-        // thing ("go fetch"), so dropped ones cost nothing.
-        let name = match item.ok()? {
-            DataEvent::Reading => "reading",
-            DataEvent::Outdoor => "outdoor",
-        };
-        Some(Ok(sse::Event::default().data(name)))
-    });
+    let db = state.db.clone();
+    let stream = BroadcastStream::new(state.events.subscribe())
+        .then(move |item| {
+            let db = db.clone();
+            async move {
+                // A lagged receiver just skips ahead; every message carries
+                // the full current state, so dropped ones cost nothing.
+                let kind = match item.ok()? {
+                    DataEvent::Reading => "reading",
+                    DataEvent::Outdoor => "outdoor",
+                };
+                let conditions = match current_conditions(db).await {
+                    Ok(conditions) => conditions,
+                    Err(error) => {
+                        tracing::event!(
+                            name: "server.stream.failure",
+                            tracing::Level::ERROR,
+                            error.message = %error,
+                            "failed to build SSE conditions payload",
+                        );
+                        return None;
+                    }
+                };
+                sse::Event::default()
+                    .event(kind)
+                    .json_data(&conditions)
+                    .ok()
+                    .map(Ok)
+            }
+        })
+        .filter_map(std::convert::identity);
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -244,7 +267,9 @@ struct Conditions {
     system: Stats,
 }
 
-async fn conditions(State(db): State<Db>) -> Result<Json<Conditions>, AppError> {
+/// Builds the current-state payload served by `/api/conditions` and pushed
+/// over `/api/stream`.
+async fn current_conditions(db: Db) -> anyhow::Result<Conditions> {
     // system::sample() reads procfs/sysfs (and may briefly sleep for its
     // first CPU baseline), so it belongs on the blocking pool too.
     let (indoor, outdoor, system) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
@@ -255,12 +280,16 @@ async fn conditions(State(db): State<Db>) -> Result<Json<Conditions>, AppError> 
     let status = indoor
         .as_ref()
         .map(|reading| weather::assess(reading, outdoor.as_ref()));
-    Ok(Json(Conditions {
+    Ok(Conditions {
         indoor,
         outdoor,
         status,
         system,
-    }))
+    })
+}
+
+async fn conditions(State(db): State<Db>) -> Result<Json<Conditions>, AppError> {
+    Ok(Json(current_conditions(db).await?))
 }
 
 /// Web-app manifest so the dashboard can be pinned to a phone home screen.

@@ -747,7 +747,11 @@ function renderUpdated() {
 setInterval(renderUpdated, 1000);
 
 async function refreshLatest() {
-  const c = await (await fetch("/api/conditions")).json();
+  applyConditions(await (await fetch("/api/conditions")).json());
+}
+
+// Renders a /api/conditions payload, whether fetched or pushed over SSE.
+function applyConditions(c) {
   const updated = document.getElementById("updated");
   const r = c.indoor;
   const sys = c.system ?? {};
@@ -915,16 +919,21 @@ document.getElementById("event-save").addEventListener("click", async () => {
 function refreshAll() { refreshLatest(); refreshHistory(); refreshRecords(); refreshRisk(); }
 refreshAll();
 
-// The server pushes a note over SSE the moment a reading or outdoor
-// observation is stored, so refreshes track real data arrival instead of
-// polling on a drifting timer. The short debounce coalesces back-to-back
-// events; EventSource reconnects on its own, and the slow poll below is a
-// safety net in case the stream ever wedges silently.
+// The server pushes the full /api/conditions payload over SSE the moment a
+// reading or outdoor observation is stored: tiles, header, and banner apply
+// it directly with zero follow-up requests. Only the charts re-fetch (their
+// queries depend on the locally chosen time window), debounced to coalesce
+// back-to-back events. EventSource reconnects on its own, and the slow poll
+// below is a safety net in case the stream ever wedges silently.
 let refreshQueued;
-new EventSource("/api/stream").onmessage = () => {
+const onPush = e => {
+  applyConditions(JSON.parse(e.data));
   clearTimeout(refreshQueued);
-  refreshQueued = setTimeout(refreshAll, 300);
+  refreshQueued = setTimeout(() => { refreshHistory(); refreshRecords(); refreshRisk(); }, 300);
 };
+const es = new EventSource("/api/stream");
+es.addEventListener("reading", onPush);
+es.addEventListener("outdoor", onPush);
 setInterval(refreshAll, 300_000);
 </script>
 </body>
