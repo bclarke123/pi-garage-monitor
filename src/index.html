@@ -291,15 +291,40 @@
 
 let hours = 24;
 let data = [];
+let outdoorData = [];
 let deltaData = [];
 let swingData = [];
 let timelineEvents = [];
 let hasOutdoor = false;
 
+// Indoor is always blue, outdoor always orange, on every overlay chart.
+// A series with its own `rows` is drawn on its own timestamps — outdoor
+// observations arrive every 15 minutes, indoor every minute.
+const outdoorSeries = field =>
+  ({ field, color: "--series-hum", label: "outdoor", rows: () => outdoorData });
+
 const CHARTS = [
-  { card: "chart-temp", field: "temperature_c", color: "--series-temp", unit: "°C",  decimals: 1 },
-  { card: "chart-hum",  field: "humidity_pct",  color: "--series-hum",  unit: "%",   decimals: 0 },
-  { card: "chart-pres", field: "pressure_hpa",  color: "--series-pres", unit: "hPa", decimals: 1 },
+  {
+    card: "chart-temp", unit: "°C", decimals: 1,
+    series: [
+      { field: "temperature_c", color: "--series-temp", label: "indoor" },
+      outdoorSeries("temperature_c"),
+    ],
+  },
+  {
+    card: "chart-hum", unit: "%", decimals: 0,
+    series: [
+      { field: "humidity_pct", color: "--series-temp", label: "indoor" },
+      outdoorSeries("humidity_pct"),
+    ],
+  },
+  {
+    card: "chart-pres", unit: "hPa", decimals: 1,
+    series: [
+      { field: "pressure_hpa", color: "--series-temp", label: "indoor" },
+      outdoorSeries("pressure_hpa"),
+    ],
+  },
   {
     card: "chart-delta", field: "delta_c", color: "--series-delta", unit: "°C", decimals: 1,
     rows: () => deltaData,
@@ -317,7 +342,7 @@ const CHARTS = [
     xDates: true,
     series: [
       { field: "indoor_c", color: "--series-temp", label: "indoor" },
-      { field: "outdoor_c", color: "--series-swing", label: "outdoor" },
+      { field: "outdoor_c", color: "--series-hum", label: "outdoor" },
     ],
     emptyText: "Needs a couple of days of data — the swing trend appears after day two.",
   },
@@ -363,7 +388,12 @@ function xLabel(ts) {
 function drawChart(spec) {
   const card = document.getElementById(spec.card);
   const rows = spec.rows ? spec.rows() : data;
-  const series = spec.series || [{ field: spec.field, color: spec.color }];
+  // A series may bring its own rows (e.g. outdoor observations on their own
+  // 15-minute timestamps); ones without enough points to draw are dropped,
+  // so an outdoor overlay simply doesn't appear until weather data exists.
+  const series = (spec.series || [{ field: spec.field, color: spec.color }])
+    .map(sr => ({ ...sr, rows: sr.rows ? sr.rows() : rows }))
+    .filter(sr => sr.rows.length >= 2);
   card.querySelectorAll("svg, .empty, .tooltip, .legend").forEach(n => n.remove());
 
   if (rows.length < 2) {
@@ -394,9 +424,9 @@ function drawChart(spec) {
   const M = { top: 8, right: 12, bottom: 22, left: 44 };
   const iw = W - M.left - M.right, ih = H - M.top - M.bottom;
 
-  const xs = rows.map(r => r.ts);
-  const vs = series.flatMap(sr => rows.map(r => r[sr.field])).filter(Number.isFinite);
-  const xMin = xs[0], xMax = xs[xs.length - 1];
+  const vs = series.flatMap(sr => sr.rows.map(r => r[sr.field])).filter(Number.isFinite);
+  const xMin = Math.min(...series.map(sr => sr.rows[0].ts));
+  const xMax = Math.max(...series.map(sr => sr.rows[sr.rows.length - 1].ts));
   let vMin = Math.min(...vs), vMax = Math.max(...vs);
   const pad = (vMax - vMin) * 0.12 || 1;
   vMin -= pad; vMax += pad;
@@ -453,19 +483,20 @@ function drawChart(spec) {
   }
 
   // A break in sampling (power cut, daemon down) must show as a gap in the
-  // line, not a fabricated straight segment across the outage.
-  const dts = [];
-  for (let i = 1; i < xs.length; i++) dts.push(xs[i] - xs[i - 1]);
-  const sorted = dts.slice().sort((a, b) => a - b);
-  const maxGap = (sorted[Math.floor(sorted.length / 2)] || 1) * 3.5;
-
+  // line, not a fabricated straight segment across the outage. Each series
+  // judges gaps against its own cadence (60 s indoor vs 15 min outdoor).
   for (const sr of series) {
+    const sxs = sr.rows.map(r => r.ts);
+    const dts = [];
+    for (let i = 1; i < sxs.length; i++) dts.push(sxs[i] - sxs[i - 1]);
+    const sorted = dts.slice().sort((a, b) => a - b);
+    const maxGap = (sorted[Math.floor(sorted.length / 2)] || 1) * 3.5;
     let path = "", pen = "M";
-    for (let i = 0; i < rows.length; i++) {
-      const v = rows[i][sr.field];
+    for (let i = 0; i < sr.rows.length; i++) {
+      const v = sr.rows[i][sr.field];
       if (!Number.isFinite(v)) { pen = "M"; continue; }
-      if (i > 0 && xs[i] - xs[i - 1] > maxGap) pen = "M";
-      path += `${pen}${X(rows[i].ts).toFixed(1)},${Y(v).toFixed(1)}`;
+      if (i > 0 && sxs[i] - sxs[i - 1] > maxGap) pen = "M";
+      path += `${pen}${X(sxs[i]).toFixed(1)},${Y(v).toFixed(1)}`;
       pen = "L";
     }
     el("path", { d: path, fill: "none", stroke: colorOf(sr.color), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" });
@@ -483,19 +514,25 @@ function drawChart(spec) {
   overlay.addEventListener("mousemove", ev => {
     const rect = svg.getBoundingClientRect();
     const ts = xMin + ((ev.clientX - rect.left) * (W / rect.width) - M.left) / iw * (xMax - xMin);
-    let best = 0;
-    for (let i = 1; i < rows.length; i++) {
-      if (Math.abs(rows[i].ts - ts) < Math.abs(rows[best].ts - ts)) best = i;
-    }
-    const r = rows[best];
+    const nearest = rs => {
+      let best = 0;
+      for (let i = 1; i < rs.length; i++) {
+        if (Math.abs(rs[i].ts - ts) < Math.abs(rs[best].ts - ts)) best = i;
+      }
+      return rs[best];
+    };
+    // The first series (indoor, densest) anchors the crosshair and the
+    // tooltip's timestamp; each series' marker sits on its own nearest point.
+    const r = nearest(series[0].rows);
     const px = X(r.ts);
     crosshair.setAttribute("x1", px); crosshair.setAttribute("x2", px);
     crosshair.setAttribute("visibility", "visible");
     let anchorY = M.top + ih / 2;
     series.forEach((sr, i) => {
-      const v = r[sr.field];
+      const p = nearest(sr.rows);
+      const v = p[sr.field];
       if (Number.isFinite(v)) {
-        markers[i].setAttribute("cx", px); markers[i].setAttribute("cy", Y(v));
+        markers[i].setAttribute("cx", X(p.ts)); markers[i].setAttribute("cy", Y(v));
         markers[i].setAttribute("visibility", "visible");
         anchorY = Y(v);
       } else {
@@ -509,7 +546,7 @@ function drawChart(spec) {
     const body = spec.tooltipHtml
       ? spec.tooltipHtml(r)
       : series.map(sr => {
-          const v = r[sr.field];
+          const v = nearest(sr.rows)[sr.field];
           const name = sr.label ? `${sr.label} ` : "";
           return `<span class="v">${name}${Number.isFinite(v) ? fmt(v, spec.decimals) : "–"} ${spec.unit}</span>`;
         }).join("<br>");
@@ -538,7 +575,7 @@ function localDate(iso) {
 
 function drawDaily() {
   const card = document.getElementById("chart-daily");
-  card.querySelectorAll("svg, .empty, .tooltip").forEach(n => n.remove());
+  card.querySelectorAll("svg, .empty, .tooltip, .legend").forEach(n => n.remove());
 
   if (dailyData.length === 0) {
     const p = document.createElement("div");
@@ -550,15 +587,30 @@ function drawDaily() {
 
   const css = getComputedStyle(card);
   const color = css.getPropertyValue("--series-temp").trim();
+  const outColor = css.getPropertyValue("--series-hum").trim();
   const gridColor = css.getPropertyValue("--grid").trim();
   const axisColor = css.getPropertyValue("--axis").trim();
+
+  // With weather data each day gets a paired half-width bar (blue indoor
+  // beside orange outdoor); without it, the single centered indoor bar.
+  const hasOut = dailyData.some(d => d.outdoor_min_c !== null);
+  if (hasOut) {
+    const legend = document.createElement("div");
+    legend.className = "legend";
+    legend.innerHTML =
+      `<span><span class="swatch" style="background:${color}"></span>indoor</span>` +
+      `<span><span class="swatch" style="background:${outColor}"></span>outdoor</span>`;
+    card.querySelector("h2").after(legend);
+  }
 
   const W = card.clientWidth - 32, H = 180;
   const M = { top: 8, right: 12, bottom: 22, left: 44 };
   const iw = W - M.left - M.right, ih = H - M.top - M.bottom;
 
-  let vMin = Math.min(...dailyData.map(d => d.min_c));
-  let vMax = Math.max(...dailyData.map(d => d.max_c));
+  let vMin = Math.min(...dailyData.flatMap(d =>
+    d.outdoor_min_c === null ? [d.min_c] : [d.min_c, d.outdoor_min_c]));
+  let vMax = Math.max(...dailyData.flatMap(d =>
+    d.outdoor_max_c === null ? [d.max_c] : [d.max_c, d.outdoor_max_c]));
   const pad = (vMax - vMin) * 0.12 || 1;
   vMin -= pad; vMax += pad;
   const Y = v => M.top + ih - ((v - vMin) / (vMax - vMin)) * ih;
@@ -584,15 +636,26 @@ function drawDaily() {
   }
   el("line", { x1: M.left, x2: M.left + iw, y1: M.top + ih, y2: M.top + ih, stroke: axisColor, "stroke-width": 1 });
 
-  // One rounded range bar per day, with a 2px gap between neighbors.
+  // One rounded range bar per day (a side-by-side pair when outdoor data
+  // exists), with a 2px gap between neighboring days.
   const slot = iw / dailyData.length;
-  const bw = Math.max(2, Math.min(18, slot - 2));
+  const pairGap = 2;
+  const bw = hasOut
+    ? Math.max(2, Math.min(9, (slot - 2 - pairGap) / 2))
+    : Math.max(2, Math.min(18, slot - 2));
   const bars = dailyData.map((d, i) => {
-    const x = M.left + slot * i + (slot - bw) / 2;
-    const yTop = Y(d.max_c);
-    const h = Math.max(2, Y(d.min_c) - yTop);
-    el("rect", { x, y: yTop, width: bw, height: h, rx: Math.min(4, bw / 2), fill: color });
-    return { x, cx: x + bw / 2 };
+    const cx = M.left + slot * (i + 0.5);
+    const bar = (min, max, x, fill) => {
+      const yTop = Y(max);
+      el("rect", { x, y: yTop, width: bw, height: Math.max(2, Y(min) - yTop), rx: Math.min(4, bw / 2), fill });
+    };
+    if (hasOut) {
+      bar(d.min_c, d.max_c, cx - bw - pairGap / 2, color);
+      if (d.outdoor_min_c !== null) bar(d.outdoor_min_c, d.outdoor_max_c, cx + pairGap / 2, outColor);
+    } else {
+      bar(d.min_c, d.max_c, cx - bw / 2, color);
+    }
+    return { cx };
   });
 
   const nLabels = Math.max(2, Math.floor(iw / 130));
@@ -618,7 +681,9 @@ function drawDaily() {
     const d = dailyData[idx];
     tooltip.innerHTML =
       `<span class="t">${localDate(d.date).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</span><br>` +
-      `<span class="v">High ${fmt(d.max_c, 1)} °C · Low ${fmt(d.min_c, 1)} °C</span>`;
+      `<span class="v">indoor ${fmt(d.max_c, 1)} / ${fmt(d.min_c, 1)} °C</span>` +
+      (d.outdoor_min_c === null ? "" :
+        `<br><span class="v">outdoor ${fmt(d.outdoor_max_c, 1)} / ${fmt(d.outdoor_min_c, 1)} °C</span>`);
     tooltip.style.display = "block";
     const scale = rect.width / W;
     const left = Math.min(bars[idx].cx * scale + 14, rect.width - tooltip.offsetWidth - 4);
@@ -738,8 +803,9 @@ async function refreshLatest() {
 }
 
 async function refreshHistory() {
-  [data, deltaData, dailyData, timelineEvents] = await Promise.all([
+  [data, outdoorData, deltaData, dailyData, timelineEvents] = await Promise.all([
     (await fetch(`/api/readings?hours=${hours}`)).json(),
+    (await fetch(`/api/outdoor?hours=${hours}`)).json(),
     (await fetch(`/api/delta?hours=${hours}`)).json(),
     (await fetch("/api/daily?days=30")).json(),
     (await fetch("/api/events")).json(),

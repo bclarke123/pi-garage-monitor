@@ -306,6 +306,37 @@ impl Db {
         rows.next().transpose().map_err(Into::into)
     }
 
+    /// Returns outdoor observations at or after `from_ts`, averaged into
+    /// `bucket_secs`-wide buckets (mirrors [`Db::since`] for the outdoor table).
+    ///
+    /// `dew_point_c` is averaged directly rather than recomputed; over a
+    /// bucket of similar observations the difference is far below sensor
+    /// accuracy.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn outdoor_since(&self, from_ts: i64, bucket_secs: i64) -> Result<Vec<OutdoorReading>> {
+        let bucket_secs = bucket_secs.max(1);
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT (ts / ?2) * ?2 AS bucket,
+                    AVG(temperature_c), AVG(humidity_pct), AVG(dew_point_c), AVG(pressure_hpa)
+             FROM outdoor WHERE ts >= ?1
+             GROUP BY bucket ORDER BY bucket",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![from_ts, bucket_secs], |row| {
+            Ok(OutdoorReading {
+                ts: row.get(0)?,
+                temperature_c: row.get(1)?,
+                humidity_pct: row.get(2)?,
+                dew_point_c: row.get(3)?,
+                pressure_hpa: row.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     /// Returns indoor vs outdoor temperature joined into common time buckets.
     ///
     /// Buckets with no outdoor observation are omitted, so the result is
@@ -596,6 +627,28 @@ mod tests {
         let latest = db.latest().unwrap().unwrap();
         assert_eq!(latest.ts, 200);
         assert!((latest.temperature_c - 21.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn outdoor_since_averages_into_buckets() {
+        let db = Db::open_in_memory().unwrap();
+        for (ts, temperature_c) in [(100, 10.0), (150, 20.0), (700, 30.0)] {
+            db.insert_outdoor(&OutdoorReading {
+                ts,
+                temperature_c,
+                humidity_pct: 70.0,
+                dew_point_c: 5.0,
+                pressure_hpa: Some(1010.0),
+            })
+            .unwrap();
+        }
+        let rows = db.outdoor_since(0, 600).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].ts, 0);
+        assert!((rows[0].temperature_c - 15.0).abs() < f64::EPSILON);
+        assert_eq!(rows[1].ts, 600);
+        assert!((rows[1].temperature_c - 30.0).abs() < f64::EPSILON);
+        assert!((rows[1].pressure_hpa.unwrap() - 1010.0).abs() < f64::EPSILON);
     }
 
     #[test]

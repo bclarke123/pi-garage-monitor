@@ -40,6 +40,7 @@ pub async fn serve(db: Db, listen: SocketAddr) -> Result<()> {
         .route("/api/records", get(records))
         .route("/api/daily", get(daily))
         .route("/api/conditions", get(conditions))
+        .route("/api/outdoor", get(outdoor))
         .route("/api/risk", get(risk))
         .route("/api/delta", get(delta))
         .route("/api/events", get(list_events).post(create_event))
@@ -121,6 +122,19 @@ async fn delta(
     let bucket_secs = (window_secs / MAX_POINTS).max(DELTA_MIN_BUCKET_SECS);
     let rows =
         tokio::task::spawn_blocking(move || db.temperature_delta(from_ts, bucket_secs)).await??;
+    Ok(Json(rows))
+}
+
+async fn outdoor(
+    State(db): State<Db>,
+    Query(params): Query<ReadingsParams>,
+) -> Result<Json<Vec<OutdoorReading>>, AppError> {
+    let hours = params.hours.unwrap_or(24).clamp(1, MAX_HOURS);
+    let window_secs = i64::from(hours) * 3600;
+    let from_ts = unix_ts_now() - window_secs;
+    let bucket_secs = (window_secs / MAX_POINTS).max(1);
+    let rows =
+        tokio::task::spawn_blocking(move || db.outdoor_since(from_ts, bucket_secs)).await??;
     Ok(Json(rows))
 }
 

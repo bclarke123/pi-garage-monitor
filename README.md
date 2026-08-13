@@ -100,13 +100,14 @@ open http://localhost:8080
 
 - `GET /api/latest` — most recent reading
 - `GET /api/readings?hours=24` — history, bucket-averaged to ≤ ~1000 points
+- `GET /api/outdoor?hours=24` — outdoor observation history, bucket-averaged the same way; empty until weather polling is enabled
 - `GET /api/records` — all-time extremes (high/low temperature and humidity, each with its timestamp)
 - `GET /api/daily?days=30` — per-local-calendar-day temperature min/max
 - `GET /api/conditions` — latest indoor + outdoor state plus the condensation assessment (`status.level` is `ok`/`warning`/`critical`)
 - `GET /api/risk?days=30` — retroactive per-day condensation summary: minutes saturated / near saturation, humidity peak, indoor low, outdoor dew-point max, and the day's worst severity level
 - `GET /api/delta?hours=24` — indoor vs outdoor temperature joined into shared ≥15-min buckets, with `delta_c` (positive = warmer inside); empty until weather polling is enabled
 - `GET /api/events` / `POST /api/events` (`{"ts": <unix-secs, optional>, "label": "roof replaced"}`) / `DELETE /api/events/{id}` — renovation timeline markers, drawn as dashed vertical lines on the charts; add them from the dashboard's "＋ event" button or via curl
-- `GET /api/conditions` also reports `cpu_temp_c` (the Pi's SoC temperature) as a sensor sanity check
+- `GET /api/conditions` also reports a `system` object — the Pi's SoC temperature, CPU/memory/swap usage, and live firmware throttle flags — for the dashboard's header stats
 
 The dashboard can be pinned to a phone home screen (web-app manifest is
 served at `/manifest.webmanifest`); on iOS use Share → Add to Home Screen.
