@@ -22,6 +22,10 @@ use crate::unix_ts_now;
 /// faster wastes their goodwill (it is free and keyless) for no new data.
 const POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
+/// Outdoor observations older than this are treated as missing — a stale
+/// value from a dead API poller must not silence (or raise) warnings.
+pub const OUTDOOR_STALE_SECS: i64 = 2 * 3600;
+
 /// Location to fetch outdoor weather for.
 #[derive(Debug, Clone, Copy)]
 pub struct Coordinates {

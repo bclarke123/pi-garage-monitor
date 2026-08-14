@@ -6,6 +6,7 @@
 //! with `--mock` on a development machine to use a simulated sensor.
 
 mod db;
+mod notify;
 mod sensor;
 mod system;
 mod weather;
@@ -44,6 +45,11 @@ struct Args {
     /// Longitude for outdoor weather via Open-Meteo.
     #[arg(long, requires = "latitude", allow_hyphen_values = true)]
     longitude: Option<f64>,
+
+    /// ntfy URL (e.g. `https://ntfy.sh/<topic>`) for push alerts on risk
+    /// level changes; alerts are disabled without it.
+    #[arg(long)]
+    ntfy_url: Option<String>,
 }
 
 /// A "new data just landed" note, broadcast from the sampler threads to the
@@ -101,6 +107,12 @@ async fn main() -> Result<()> {
         let weather_db = db.clone();
         let weather_events = events.clone();
         std::thread::spawn(move || weather::run_poller(coordinates, weather_db, weather_events));
+    }
+
+    if let Some(ntfy_url) = args.ntfy_url {
+        let notify_db = db.clone();
+        let notify_events = events.subscribe();
+        std::thread::spawn(move || notify::run_notifier(ntfy_url, notify_db, notify_events));
     }
 
     web::serve(db, args.listen, events).await

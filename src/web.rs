@@ -268,10 +268,6 @@ async fn risk(
     Ok(Json(rows))
 }
 
-/// Outdoor observations older than this are treated as missing — a stale
-/// value from a dead API poller must not silence (or raise) warnings.
-const OUTDOOR_STALE_SECS: i64 = 2 * 3600;
-
 /// Combined current state for the dashboard header and warning banner.
 #[derive(Debug, Serialize)]
 struct Conditions {
@@ -290,7 +286,7 @@ async fn current_conditions(db: Db) -> anyhow::Result<Conditions> {
         Ok((db.latest()?, db.latest_outdoor()?, system::sample()))
     })
     .await??;
-    let outdoor = outdoor.filter(|o| unix_ts_now() - o.ts <= OUTDOOR_STALE_SECS);
+    let outdoor = outdoor.filter(|o| unix_ts_now() - o.ts <= weather::OUTDOOR_STALE_SECS);
     let status = indoor
         .as_ref()
         .map(|reading| weather::assess(reading, outdoor.as_ref()));

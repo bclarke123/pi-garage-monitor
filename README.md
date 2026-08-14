@@ -101,6 +101,23 @@ The dashboard needs no changes — reload it and the empty-state messages
 fill in as data accumulates (charts after a few readings, daily ranges
 after the first day, the outdoor delta within ~30 minutes).
 
+## Nightly database backup (optional)
+
+A year of renovation baseline shouldn't live only on an SD card in a hot
+garage. `deploy/backup-garage-db.sh` snapshots the database with SQLite's
+online-backup API (safe against the live daemon), verifies integrity, and
+rsyncs it to another machine — keeping a self-rotating week of dailies
+plus one archival copy per month. Setup instructions are in the script's
+header comment; edit `DB`/`DEST` at the top for your hosts, and drive it
+from cron:
+
+```
+17 3 * * * /usr/local/bin/backup-garage-db.sh 2>&1 | logger -t garage-backup
+```
+
+Restoring is just copying a snapshot back to
+`/var/lib/garage-monitor/garage.db` with the daemon stopped.
+
 ## Outdoor weather &amp; condensation warnings (optional)
 
 Pass your location to enable outdoor weather via the free, keyless
@@ -122,6 +139,24 @@ banner when condensation threatens electronics in the space:
 
 Without the flags, the daemon never touches the network and the dashboard
 still shows the indoor dew point derived from the BME280 itself.
+
+## Push alerts via ntfy (optional)
+
+Pass an [ntfy](https://ntfy.sh) URL to get push notifications when the
+risk level changes:
+
+```sh
+pi-garage-monitor ... --ntfy-url https://ntfy.sh/<topic>
+```
+
+Subscribe to the same topic in the ntfy phone app. Escalations
+(ok → caution → alert) push immediately; the follow-up "all clear" waits
+out a 15-minute cooldown so conditions hovering at a threshold can't
+flood the phone. Works identically against a self-hosted ntfy server —
+just point the URL at it.
+
+On the public ntfy.sh server the topic name is the only access control,
+so pick something unguessable (`garage-<random suffix>`), not a word.
 
 ## Local development (no Pi needed)
 

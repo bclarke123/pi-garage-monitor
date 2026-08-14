@@ -8,8 +8,9 @@ ExecStart=/usr/local/bin/pi-garage-monitor \
     --db /var/lib/garage-monitor/garage.db \
     --listen 0.0.0.0:8080 \
     --interval-secs 60 \
-    --latitude 43.20 \
-    --longitude -79.56
+    --latitude 43.1944 \
+    --longitude -79.6002 \
+    --ntfy-url https://ntfy.sh/garage-pi-a8tXp
 # Creates /var/lib/garage-monitor owned by the service user.
 StateDirectory=garage-monitor
 # Match the account created when the Pi was imaged (modern Raspberry Pi
