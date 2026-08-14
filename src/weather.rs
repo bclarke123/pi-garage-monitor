@@ -54,9 +54,11 @@ pub fn run_poller(
                 Ok(()) => {
                     // No receivers (nobody watching the dashboard) is fine.
                     let _ = events.send(crate::DataEvent::Outdoor);
+                    // DEBUG for the same reason as sensor.read.success:
+                    // routine success is journal spam at INFO.
                     tracing::event!(
                         name: "weather.fetch.success",
-                        tracing::Level::INFO,
+                        tracing::Level::DEBUG,
                         outdoor.temperature_c = outdoor.temperature_c,
                         outdoor.dew_point_c = outdoor.dew_point_c,
                         "stored outdoor reading",

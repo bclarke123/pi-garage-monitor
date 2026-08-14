@@ -63,18 +63,18 @@ Check which one you need with `uname -m` on the Pi: `armv7l` → armv7,
 
 ```sh
 # from this repo on your workstation (binary downloaded from CI into ~/Downloads)
-scp ~/Downloads/pi-garage-monitor-aarch64-unknown-linux-musl jamin@raspberrypi.local:/tmp/pi-garage-monitor
-scp deploy/garage-monitor.service jamin@raspberrypi.local:/tmp/
+scp ~/Downloads/pi-garage-monitor-aarch64-unknown-linux-musl jamin@rhubarb.local:/tmp/pi-garage-monitor
+scp deploy/garage-monitor.service jamin@rhubarb.local:/tmp/
 
 # on the Pi
 sudo install -m 755 /tmp/pi-garage-monitor /usr/local/bin/pi-garage-monitor
 sudo install -m 644 /tmp/garage-monitor.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now garage-monitor
-journalctl -u garage-monitor -f   # watch it take its first readings
+journalctl -u garage-monitor -f   # "dashboard listening" then quiet = healthy
 ```
 
-Then open <http://garage-pi.local:8080> from anything on your network.
+Then open <http://rhubarb.local:8080> from anything on your network.
 The dashboard shows current values plus charts over 24h/48h/7d/30d.
 
 ## Cutting over from mock mode
@@ -92,8 +92,12 @@ sudo systemctl revert garage-monitor # removes the --mock override drop-in
 sudo rm /var/lib/garage-monitor/garage.db
 sudo systemctl start garage-monitor
 
-journalctl -u garage-monitor -f      # watch for sensor.read.success
+journalctl -u garage-monitor -f      # quiet startup = healthy; errors are loud
+curl -s localhost:8080/api/latest    # first real reading appears within a minute
 ```
+
+Per-reading logs are DEBUG level; to watch every reading scroll by, add
+`Environment=RUST_LOG=debug` to the unit (or run the binary with it set).
 
 The schema is recreated automatically on first start; records, daily
 history, and risk assessments all begin fresh from the first real reading.

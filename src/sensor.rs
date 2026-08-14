@@ -103,9 +103,10 @@ pub fn run_sampler(
                 Ok(()) => {
                     // No receivers (nobody watching the dashboard) is fine.
                     let _ = events.send(crate::DataEvent::Reading);
+                    // DEBUG: once a minute forever is journal spam at INFO.
                     tracing::event!(
                         name: "sensor.read.success",
-                        tracing::Level::INFO,
+                        tracing::Level::DEBUG,
                         reading.ts = reading.ts,
                         reading.temperature_c = reading.temperature_c,
                         reading.humidity_pct = reading.humidity_pct,
