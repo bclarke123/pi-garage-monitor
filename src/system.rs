@@ -160,14 +160,28 @@ fn parse_meminfo(raw: &str) -> (Option<f64>, Option<f64>) {
 }
 
 fn throttle() -> Option<Throttle> {
-    let raw =
-        std::fs::read_to_string("/sys/devices/platform/soc/soc:firmware/get_throttled").ok()?;
+    // The firmware node's sysfs path varies across kernel/device-tree
+    // versions; fall back to vcgencmd (present on every Pi OS image).
+    let raw = std::fs::read_to_string("/sys/devices/platform/soc/soc:firmware/get_throttled")
+        .ok()
+        .or_else(|| {
+            let output = std::process::Command::new("vcgencmd")
+                .arg("get_throttled")
+                .output()
+                .ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        })?;
     parse_throttled(&raw)
 }
 
-/// Parses the firmware throttle bitmask (hex, with or without `0x`).
+/// Parses the firmware throttle bitmask: bare hex with or without `0x`,
+/// or vcgencmd's `throttled=0x...` form.
 fn parse_throttled(raw: &str) -> Option<Throttle> {
-    let bits = u32::from_str_radix(raw.trim().trim_start_matches("0x"), 16).ok()?;
+    let hex = raw.trim().trim_start_matches("throttled=");
+    let bits = u32::from_str_radix(hex.trim_start_matches("0x"), 16).ok()?;
     Some(Throttle {
         under_voltage: bits & 0x1 != 0,
         frequency_capped: bits & 0x2 != 0,
@@ -218,6 +232,12 @@ mod tests {
         let (memory, swap) = parse_meminfo(raw);
         assert!(memory.is_some());
         assert!(swap.is_none());
+    }
+
+    #[test]
+    fn vcgencmd_output_form_decodes() {
+        let t = parse_throttled("throttled=0x50005\n").expect("parses");
+        assert!(t.under_voltage && t.throttled);
     }
 
     #[test]

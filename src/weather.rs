@@ -200,8 +200,10 @@ pub fn assess(indoor: &Reading, outdoor: Option<&OutdoorReading>) -> Assessment 
     } else if let Some(outdoor) = outdoor.filter(|o| o.dew_point_c > indoor.temperature_c) {
         (
             Level::Warning,
+            // "at or above": the comparison is strictly >, but at one
+            // decimal of display the two values can render as equal.
             format!(
-                "Outdoor dew point ({:.1} °C) is above the indoor temperature ({:.1} °C) — \
+                "Outdoor dew point ({:.1} °C) is at or above the indoor temperature ({:.1} °C) — \
                  incoming air will condense on anything in here. Keep the space closed up.",
                 outdoor.dew_point_c, indoor.temperature_c
             ),
