@@ -890,8 +890,8 @@ async function refreshRisk() {
       if (d.saturated_minutes > 0) details.push(`${d.saturated_minutes} min saturated`);
       if (d.near_saturation_minutes > 0) details.push(`${d.near_saturation_minutes} min near saturation`);
       details.push(`peak ${fmt(d.max_humidity_pct, 0)}% RH`);
-      if (d.max_outdoor_dew_point_c !== null && d.max_outdoor_dew_point_c > d.min_temperature_c) {
-        details.push(`outdoor dew ${fmt(d.max_outdoor_dew_point_c, 1)} °C vs ${fmt(d.min_temperature_c, 1)} °C indoor low`);
+      if (d.incoming_air_minutes > 0) {
+        details.push(`${d.incoming_air_minutes} min of outdoor dew above indoor temp`);
       }
       if (d.min_temperature_c <= 0) details.push(`frost — low ${fmt(d.min_temperature_c, 1)} °C`);
       const date = localDate(d.date).toLocaleDateString(undefined,

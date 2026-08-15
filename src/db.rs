@@ -383,22 +383,22 @@ impl Db {
     /// # Errors
     /// Returns an error if a query fails.
     pub fn daily_risk(&self, from_ts: i64) -> Result<Vec<DayRisk>> {
-        // Spread bands mirror the live assessment in `weather::assess`.
-        const SPREAD_SATURATED_C: f64 = 1.0;
-        const SPREAD_NEAR_C: f64 = 3.0;
-
-        struct Acc {
-            saturated_minutes: u32,
-            near_minutes: u32,
-            last_saturated_minute: i64,
-            last_near_minute: i64,
-            min_spread_c: f64,
-            max_humidity_pct: f64,
-            min_temperature_c: f64,
-        }
-
         let conn = self.lock();
-        let mut days: std::collections::BTreeMap<String, Acc> = std::collections::BTreeMap::new();
+
+        // All outdoor observations in range, ordered, for nearest-in-time
+        // matching against each reading as we stream them below.
+        let mut stmt =
+            conn.prepare("SELECT ts, dew_point_c FROM outdoor WHERE ts >= ?1 - ?2 ORDER BY ts")?;
+        let outdoor: Vec<(i64, f64)> = stmt
+            .query_map(
+                rusqlite::params![from_ts, DewMatcher::TOLERANCE_SECS],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut dew_matcher = DewMatcher::new(outdoor);
+
+        let mut days: std::collections::BTreeMap<String, DayAcc> =
+            std::collections::BTreeMap::new();
         let mut stmt = conn.prepare(
             "SELECT date(ts, 'unixepoch', 'localtime'), ts, temperature_c, humidity_pct
              FROM readings WHERE ts >= ?1 ORDER BY ts",
@@ -413,28 +413,10 @@ impl Db {
         })?;
         for row in rows {
             let (day, ts, temperature_c, humidity_pct) = row?;
-            let spread = temperature_c - crate::weather::dew_point_c(temperature_c, humidity_pct);
-            let minute = ts.div_euclid(60);
-            let acc = days.entry(day).or_insert(Acc {
-                saturated_minutes: 0,
-                near_minutes: 0,
-                last_saturated_minute: i64::MIN,
-                last_near_minute: i64::MIN,
-                min_spread_c: f64::INFINITY,
-                max_humidity_pct: f64::NEG_INFINITY,
-                min_temperature_c: f64::INFINITY,
-            });
-            if spread < SPREAD_SATURATED_C && minute != acc.last_saturated_minute {
-                acc.saturated_minutes += 1;
-                acc.last_saturated_minute = minute;
-            }
-            if spread < SPREAD_NEAR_C && minute != acc.last_near_minute {
-                acc.near_minutes += 1;
-                acc.last_near_minute = minute;
-            }
-            acc.min_spread_c = acc.min_spread_c.min(spread);
-            acc.max_humidity_pct = acc.max_humidity_pct.max(humidity_pct);
-            acc.min_temperature_c = acc.min_temperature_c.min(temperature_c);
+            let concurrent_dew = dew_matcher.nearest(ts);
+            days.entry(day)
+                .or_default()
+                .observe(ts, temperature_c, humidity_pct, concurrent_dew);
         }
 
         let mut outdoor_dew: std::collections::HashMap<String, f64> =
@@ -459,12 +441,13 @@ impl Db {
                     level: crate::weather::assess_day(
                         acc.saturated_minutes,
                         acc.near_minutes,
+                        acc.incoming_air_minutes,
                         acc.min_temperature_c,
-                        max_outdoor_dew_point_c,
                     ),
                     date,
                     saturated_minutes: acc.saturated_minutes,
                     near_saturation_minutes: acc.near_minutes,
+                    incoming_air_minutes: acc.incoming_air_minutes,
                     min_spread_c: acc.min_spread_c,
                     max_humidity_pct: acc.max_humidity_pct,
                     min_temperature_c: acc.min_temperature_c,
@@ -477,6 +460,100 @@ impl Db {
     fn lock(&self) -> MutexGuard<'_, Connection> {
         // A poisoned mutex means another thread already panicked; stop too.
         self.conn.lock().expect("database mutex poisoned")
+    }
+}
+
+/// Walks a time-ordered list of outdoor `(ts, dew_point_c)` observations,
+/// yielding the one nearest each queried timestamp. Queries must arrive in
+/// ascending order (they do: readings stream out of `SQLite` time-sorted).
+struct DewMatcher {
+    observations: Vec<(i64, f64)>,
+    idx: usize,
+}
+
+impl DewMatcher {
+    /// A reading only counts as exposed to incoming air if an outdoor
+    /// observation exists this close to it in time — dew point changes
+    /// slowly, and the poller reports every 15 minutes when healthy.
+    const TOLERANCE_SECS: i64 = 30 * 60;
+
+    fn new(observations: Vec<(i64, f64)>) -> Self {
+        Self {
+            observations,
+            idx: 0,
+        }
+    }
+
+    /// Returns the dew point observed nearest `ts`, if within tolerance.
+    fn nearest(&mut self, ts: i64) -> Option<f64> {
+        while self.idx + 1 < self.observations.len()
+            && (self.observations[self.idx + 1].0 - ts).abs()
+                <= (self.observations[self.idx].0 - ts).abs()
+        {
+            self.idx += 1;
+        }
+        self.observations
+            .get(self.idx)
+            .filter(|(observed_ts, _)| (observed_ts - ts).abs() <= Self::TOLERANCE_SECS)
+            .map(|&(_, dew)| dew)
+    }
+}
+
+/// Per-day risk tallies, accumulated one reading at a time.
+///
+/// Minutes are counted as distinct sample minutes so the tallies stay
+/// honest at any sample interval.
+struct DayAcc {
+    saturated_minutes: u32,
+    near_minutes: u32,
+    incoming_air_minutes: u32,
+    last_saturated_minute: i64,
+    last_near_minute: i64,
+    last_incoming_minute: i64,
+    min_spread_c: f64,
+    max_humidity_pct: f64,
+    min_temperature_c: f64,
+}
+
+impl Default for DayAcc {
+    fn default() -> Self {
+        Self {
+            saturated_minutes: 0,
+            near_minutes: 0,
+            incoming_air_minutes: 0,
+            last_saturated_minute: i64::MIN,
+            last_near_minute: i64::MIN,
+            last_incoming_minute: i64::MIN,
+            min_spread_c: f64::INFINITY,
+            max_humidity_pct: f64::NEG_INFINITY,
+            min_temperature_c: f64::INFINITY,
+        }
+    }
+}
+
+impl DayAcc {
+    fn observe(&mut self, ts: i64, temperature_c: f64, humidity_pct: f64, dew_c: Option<f64>) {
+        // Spread bands mirror the live assessment in `weather::assess`.
+        const SPREAD_SATURATED_C: f64 = 1.0;
+        const SPREAD_NEAR_C: f64 = 3.0;
+
+        let spread = temperature_c - crate::weather::dew_point_c(temperature_c, humidity_pct);
+        let minute = ts.div_euclid(60);
+        if spread < SPREAD_SATURATED_C && minute != self.last_saturated_minute {
+            self.saturated_minutes += 1;
+            self.last_saturated_minute = minute;
+        }
+        if spread < SPREAD_NEAR_C && minute != self.last_near_minute {
+            self.near_minutes += 1;
+            self.last_near_minute = minute;
+        }
+        if dew_c.is_some_and(|dew| dew > temperature_c) && minute != self.last_incoming_minute {
+            self.incoming_air_minutes += 1;
+            self.last_incoming_minute = minute;
+        }
+        self.min_spread_c = self.min_spread_c.min(spread);
+        self.max_humidity_pct = self.max_humidity_pct.max(humidity_pct);
+        self.min_temperature_c = self.min_temperature_c.min(temperature_c);
     }
 }
 
@@ -504,6 +581,9 @@ pub struct DayRisk {
     pub saturated_minutes: u32,
     /// Distinct sample minutes with dew-point spread below 3 °C.
     pub near_saturation_minutes: u32,
+    /// Distinct sample minutes where the concurrent outdoor dew point
+    /// exceeded the indoor temperature (incoming air would condense).
+    pub incoming_air_minutes: u32,
     /// Smallest dew-point spread of the day, in °C.
     pub min_spread_c: f64,
     /// Highest indoor relative humidity of the day, in percent.
@@ -755,14 +835,17 @@ mod tests {
             })
             .unwrap();
         }
-        // Day 2: dry indoors (min temp 10 °C) but outdoor dew point 15 °C → warning.
-        db.insert(&Reading {
-            ts: DAY + DAY / 2,
-            temperature_c: 10.0,
-            humidity_pct: 50.0,
-            pressure_hpa: 1013.0,
-        })
-        .unwrap();
+        // Day 2: a 16-minute spell where the *concurrent* outdoor dew point
+        // (15 °C) exceeds the indoor temperature (10 °C) → warning.
+        for i in 0..16 {
+            db.insert(&Reading {
+                ts: DAY + DAY / 2 + i * 60,
+                temperature_c: 10.0,
+                humidity_pct: 50.0,
+                pressure_hpa: 1013.0,
+            })
+            .unwrap();
+        }
         db.insert_outdoor(&OutdoorReading {
             ts: DAY + DAY / 2,
             temperature_c: 22.0,
@@ -771,13 +854,33 @@ mod tests {
             pressure_hpa: Some(1010.0),
         })
         .unwrap();
+        // Day 3: same cold morning reading and same 15 °C dew peak, but
+        // hours apart — no concurrent crossing, so the day stays ok.
+        db.insert(&Reading {
+            ts: 2 * DAY + DAY / 4,
+            temperature_c: 10.0,
+            humidity_pct: 50.0,
+            pressure_hpa: 1013.0,
+        })
+        .unwrap();
+        db.insert_outdoor(&OutdoorReading {
+            ts: 2 * DAY + 3 * (DAY / 4),
+            temperature_c: 22.0,
+            humidity_pct: 80.0,
+            dew_point_c: 15.0,
+            pressure_hpa: Some(1010.0),
+        })
+        .unwrap();
 
         let days = db.daily_risk(0).unwrap();
-        assert_eq!(days.len(), 2);
+        assert_eq!(days.len(), 3);
         assert_eq!(days[0].level, crate::weather::Level::Critical);
         assert_eq!(days[0].saturated_minutes, 6);
         assert_eq!(days[1].level, crate::weather::Level::Warning);
+        assert_eq!(days[1].incoming_air_minutes, 16);
         assert!((days[1].max_outdoor_dew_point_c.unwrap() - 15.0).abs() < f64::EPSILON);
+        assert_eq!(days[2].level, crate::weather::Level::Ok);
+        assert_eq!(days[2].incoming_air_minutes, 0);
     }
 
     #[test]

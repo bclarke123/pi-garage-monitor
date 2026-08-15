@@ -258,30 +258,34 @@ pub fn assess(indoor: &Reading, outdoor: Option<&OutdoorReading>) -> Assessment 
 
 /// Classifies one past day's risk from its aggregates.
 ///
-/// `max_outdoor_dew_point_c` is compared against the day's *minimum* indoor
-/// temperature: surfaces lag air temperature, so the daily low is the best
-/// proxy for how cold the room's contents got.
+/// `incoming_air_minutes` counts sample minutes where the *concurrent*
+/// outdoor dew point exceeded the indoor temperature — the same moment-by-
+/// moment comparison the live banner makes. If the space lags outdoor
+/// conditions, that lag is already present in the sensor's own readings,
+/// so no day-extreme cross-combination is needed (or wanted: comparing a
+/// morning low against an afternoon dew peak flags crossings that never
+/// physically happened).
 #[must_use]
 pub fn assess_day(
     saturated_minutes: u32,
     near_saturation_minutes: u32,
+    incoming_air_minutes: u32,
     min_temperature_c: f64,
-    max_outdoor_dew_point_c: Option<f64>,
 ) -> Level {
     // A few saturated minutes can be sensor noise around a real spread of
-    // ~1 °C; a quarter hour near saturation is a genuine damp spell.
+    // ~1 °C; a quarter hour near saturation (or of incoming-air exposure)
+    // is a genuine damp spell.
     const SATURATED_CRITICAL_MINUTES: u32 = 5;
     const NEAR_SATURATION_WARNING_MINUTES: u32 = 15;
+    const INCOMING_AIR_WARNING_MINUTES: u32 = 15;
     // Retrospective frost only flags an actual sub-zero dip, not the wider
     // "approaching freezing" band the live banner warns about.
     const FROST_C: f64 = 0.0;
 
-    let incoming_air_risk =
-        max_outdoor_dew_point_c.is_some_and(|dew_point| dew_point > min_temperature_c);
     if saturated_minutes >= SATURATED_CRITICAL_MINUTES {
         Level::Critical
     } else if near_saturation_minutes >= NEAR_SATURATION_WARNING_MINUTES
-        || incoming_air_risk
+        || incoming_air_minutes >= INCOMING_AIR_WARNING_MINUTES
         || min_temperature_c <= FROST_C
     {
         Level::Warning
@@ -343,18 +347,18 @@ mod tests {
 
     #[test]
     fn day_with_sustained_saturation_is_critical() {
-        assert_eq!(assess_day(10, 60, 5.0, None), Level::Critical);
+        assert_eq!(assess_day(10, 60, 0, 5.0), Level::Critical);
     }
 
     #[test]
-    fn day_with_damp_spell_or_humid_outdoor_air_is_warning() {
-        assert_eq!(assess_day(0, 30, 5.0, None), Level::Warning);
-        assert_eq!(assess_day(0, 0, 10.0, Some(14.0)), Level::Warning);
+    fn day_with_damp_spell_or_incoming_air_exposure_is_warning() {
+        assert_eq!(assess_day(0, 30, 0, 5.0), Level::Warning);
+        assert_eq!(assess_day(0, 0, 20, 10.0), Level::Warning);
     }
 
     #[test]
     fn brief_blips_and_dry_days_are_ok() {
-        assert_eq!(assess_day(2, 10, 10.0, Some(4.0)), Level::Ok);
+        assert_eq!(assess_day(2, 10, 5, 10.0), Level::Ok);
     }
 
     #[test]
@@ -381,8 +385,8 @@ mod tests {
 
     #[test]
     fn day_dipping_below_freezing_is_warning() {
-        assert_eq!(assess_day(0, 0, -2.0, None), Level::Warning);
-        assert_eq!(assess_day(0, 0, 1.5, None), Level::Ok);
+        assert_eq!(assess_day(0, 0, 0, -2.0), Level::Warning);
+        assert_eq!(assess_day(0, 0, 0, 1.5), Level::Ok);
     }
 
     #[test]

@@ -181,7 +181,7 @@ open http://localhost:8080
 - `GET /api/records` — all-time extremes (high/low temperature and humidity, each with its timestamp)
 - `GET /api/daily?days=30` — per-local-calendar-day temperature min/max
 - `GET /api/conditions` — latest indoor + outdoor state plus the condensation assessment (`status.level` is `ok`/`warning`/`critical`)
-- `GET /api/risk?days=30` — retroactive per-day condensation summary: minutes saturated / near saturation, humidity peak, indoor low, outdoor dew-point max, and the day's worst severity level
+- `GET /api/risk?days=30` — retroactive per-day risk summary: minutes saturated / near saturation, minutes of incoming-air exposure (outdoor dew point above the *concurrent* indoor temperature — same moment-by-moment comparison the live banner makes), humidity peak, indoor low, outdoor dew-point max, and the day's worst severity level
 - `GET /api/delta?hours=24` — indoor vs outdoor temperature joined into shared ≥15-min buckets, with `delta_c` (positive = warmer inside); empty until weather polling is enabled
 - `GET /api/events` / `POST /api/events` (`{"ts": <unix-secs, optional>, "label": "roof replaced"}`) / `DELETE /api/events/{id}` — renovation timeline markers, drawn as dashed vertical lines on the charts; add them from the dashboard's "＋ event" button or via curl
 - `GET /api/conditions` also reports a `system` object — the Pi's SoC temperature, CPU/memory/swap usage, and live firmware throttle flags — for the dashboard's header stats
