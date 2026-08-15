@@ -14,8 +14,10 @@ use std::time::Duration;
 use serde::Serialize;
 
 /// Snapshot of host health for the dashboard header.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Stats {
+    /// Hostname, so a fleet of monitors is tellable-apart at a glance.
+    pub hostname: Option<String>,
     /// `SoC` temperature in °C — a sanity cross-check for the BME280 and an
     /// early warning if the Pi itself is overheating in a summer garage.
     pub cpu_temp_c: Option<f64>,
@@ -53,12 +55,21 @@ pub fn sample() -> Stats {
     let (memory_used_pct, swap_used_pct) =
         std::fs::read_to_string("/proc/meminfo").map_or((None, None), |raw| parse_meminfo(&raw));
     Stats {
+        hostname: hostname(),
         cpu_temp_c: cpu_temp_c(),
         cpu_usage_pct: cpu_usage_pct(),
         memory_used_pct,
         swap_used_pct,
         throttle: throttle(),
     }
+}
+
+fn hostname() -> Option<String> {
+    let raw = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .ok()?;
+    let name = raw.trim();
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 fn cpu_temp_c() -> Option<f64> {

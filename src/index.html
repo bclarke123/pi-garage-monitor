@@ -764,7 +764,9 @@ function applyConditions(c) {
   // Non-breaking spaces inside each stat so narrow screens wrap between
   // stats, never through the middle of one.
   const stats = [];
-  if (sys.cpu_temp_c != null) stats.push(`Pi ${fmt(sys.cpu_temp_c, 0)} °C`);
+  const host = sys.hostname ?? "Pi";
+  if (sys.hostname) document.title = `Garage Monitor — ${sys.hostname}`;
+  if (sys.cpu_temp_c != null) stats.push(`${host} ${fmt(sys.cpu_temp_c, 0)} °C`);
   if (sys.cpu_usage_pct != null) stats.push(`cpu ${fmt(sys.cpu_usage_pct, 0)}%`);
   if (sys.memory_used_pct != null) stats.push(`mem ${fmt(sys.memory_used_pct, 0)}%`);
   pi.textContent = stats.join(" · ");
